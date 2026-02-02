@@ -374,10 +374,21 @@ static void StripCurlyBraces(char* text) {
 	*dst = 0;
 }
 
+//menu visibility array - index by menu type ID
+static UInt8* g_menuVisibility = (UInt8*)0x11F308F;
+static constexpr UInt32 kMenuType_Dialogue = 1009;
+
+static bool IsDialogueMenuOpen() {
+	return g_menuVisibility[kMenuType_Dialogue] != 0;
+}
+
 //callback from itr-nvse - receives ACTUAL speaker and duration
 static int g_callbackCount = 0;
 static void OnDialogueCallback(Actor* speaker, const char* text, float duration, TESTopicInfo* topicInfo, TESTopic* topic) {
 	if (!speaker || !text || !text[0]) return;
+
+	//skip if in dialogue menu - game shows subtitles there already
+	if (IsDialogueMenuOpen()) return;
 
 	//skip player speech
 	if (IsFormValid((TESForm*)speaker) && ((TESForm*)speaker)->refID == 0x14) return;
@@ -403,6 +414,14 @@ static void OnDialogueCallback(Actor* speaker, const char* text, float duration,
 
 static void ProcessPendingSubtitles() {
 	DWORD now = GetTickCount();
+
+	//skip all pending if dialogue menu opened (catches greeting lines)
+	if (IsDialogueMenuOpen()) {
+		for (int i = 0; i < 16; i++) {
+			if (g_pending[i].state == 2) InterlockedExchange(&g_pending[i].state, 0);
+		}
+		return;
+	}
 
 	for (int i = 0; i < 16; i++) {
 		if (InterlockedCompareExchange(&g_pending[i].state, 3, 2) == 2) {
@@ -585,6 +604,16 @@ static void UpdateSubtitlePositions() {
 	}
 }
 
+static void HideAllSubtitles() {
+	for (int i = 0; i < MAX_SUBTITLES; i++) {
+		g_activeSubtitles[i].valid = false;
+		g_activeSubtitles[i].actor = nullptr;
+		if (g_subtitleTiles[i]) {
+			g_subtitleTiles[i]->SetFloat(g_traitVisible, 0.0f);
+		}
+	}
+}
+
 static void OnHUDUpdate() {
 	if (g_disabled || !g_initialized) return;
 
@@ -597,6 +626,12 @@ static void OnHUDUpdate() {
 	PlayerCharacter* player = *g_thePlayer;
 	if (!player || !GetRefNiNode((TESObjectREFR*)player)) {
 		ResetState();
+		return;
+	}
+
+	//hide floating subtitles during dialogue menu
+	if (IsDialogueMenuOpen()) {
+		HideAllSubtitles();
 		return;
 	}
 
