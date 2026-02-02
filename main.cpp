@@ -393,36 +393,32 @@ static int g_callbackCount = 0;
 static void OnDialogueCallback(Actor* speaker, const char* text, float duration, TESTopicInfo* topicInfo, TESTopic* topic) {
 	if (!speaker || !text || !text[0]) return;
 
+	//validate speaker before any access
+	if (!IsFormValid((TESForm*)speaker)) return;
+
 	//skip if in dialogue menu - game shows subtitles there already
 	if (IsDialogueMenuOpen()) return;
 
 	//skip dialogue-initiating greetings (flags1 bit 2 = 0x04)
-	if (topicInfo) {
+	if (topicInfo && IsFormValid((TESForm*)topicInfo)) {
 		UInt8 infoFlags1 = *(UInt8*)((UInt8*)topicInfo + 0x25);
 		if (infoFlags1 & 0x04) return;
 	}
 
 	//skip player speech
-	if (IsFormValid((TESForm*)speaker) && ((TESForm*)speaker)->refID == 0x14) return;
+	if (((TESForm*)speaker)->refID == 0x14) return;
 
 	if (g_callbackCount < 30) {
-		UInt8 topicType = topic ? *(UInt8*)((UInt8*)topic + 0x24) : 0xFF;
-		UInt8 topicFlags = topic ? *(UInt8*)((UInt8*)topic + 0x25) : 0xFF;
-		float topicPriority = topic ? *(float*)((UInt8*)topic + 0x28) : 0.0f;
-		const char* topicName = topic ? *(const char**)((UInt8*)topic + 0x1C) : "null";
-		UInt8 infoType = topicInfo ? *(UInt8*)((UInt8*)topicInfo + 0x23) : 0xFF;
-		UInt8 infoFlags1 = topicInfo ? *(UInt8*)((UInt8*)topicInfo + 0x25) : 0xFF;
-		UInt8 infoFlags2 = topicInfo ? *(UInt8*)((UInt8*)topicInfo + 0x26) : 0xFF;
-		//dump more bytes to find goodbye flag
+		bool topicValid = topic && IsFormValid((TESForm*)topic);
+		bool infoValid = topicInfo && IsFormValid((TESForm*)topicInfo);
+		UInt8 topicFlags = topicValid ? *(UInt8*)((UInt8*)topic + 0x25) : 0xFF;
+		float topicPriority = topicValid ? *(float*)((UInt8*)topic + 0x28) : 0.0f;
+		const char* topicName = topicValid ? *(const char**)((UInt8*)topic + 0x1C) : "null";
+		UInt8 infoFlags1 = infoValid ? *(UInt8*)((UInt8*)topicInfo + 0x25) : 0xFF;
+		UInt8 infoFlags2 = infoValid ? *(UInt8*)((UInt8*)topicInfo + 0x26) : 0xFF;
 		Log("OnDialogue: name=%s tFlags=0x%02X pri=%.0f iFlags=0x%02X/0x%02X text=%.30s",
 			topicName ? topicName : "null", topicFlags, topicPriority,
 			infoFlags1, infoFlags2, text);
-		if (topicInfo) {
-			UInt8* p = (UInt8*)topicInfo;
-			Log("  info dump: %02X %02X %02X %02X %02X %02X %02X %02X | %02X %02X %02X %02X %02X %02X %02X %02X",
-				p[0x20], p[0x21], p[0x22], p[0x23], p[0x24], p[0x25], p[0x26], p[0x27],
-				p[0x28], p[0x29], p[0x2A], p[0x2B], p[0x2C], p[0x2D], p[0x2E], p[0x2F]);
-		}
 		g_callbackCount++;
 	}
 
