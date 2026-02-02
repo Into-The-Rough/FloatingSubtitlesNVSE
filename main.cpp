@@ -262,14 +262,21 @@ static NiAVObject* GetBlockByNameInternal(NiNode* node, const char* namePtr) {
 	UInt16 childCount = *(UInt16*)((UInt8*)node + 0xA6);
 	NiAVObject** children = *(NiAVObject***)((UInt8*)node + 0xA0);
 	if (!children || childCount == 0) return nullptr;
+	if (childCount > 512) return nullptr; //sanity check
 
 	for (UInt16 i = 0; i < childCount; i++) {
 		NiAVObject* child = children[i];
 		if (!child) continue;
+
+		//validate child pointer range before dereferencing
+		if ((UInt32)child < 0x10000 || (UInt32)child > 0x7FFFFFFF) continue;
+
 		const char* childName = *(const char**)((UInt8*)child + 0x8);
 		if (childName == namePtr) return child;
 
 		void** vtable = *(void***)child;
+		if (!vtable || (UInt32)vtable < 0x10000 || (UInt32)vtable > 0x7FFFFFFF) continue;
+
 		typedef void* (__thiscall *IsNodeFn)(void*);
 		if (((IsNodeFn)vtable[0xC / 4])(child)) {
 			NiAVObject* result = GetBlockByNameInternal((NiNode*)child, namePtr);
@@ -281,11 +288,15 @@ static NiAVObject* GetBlockByNameInternal(NiNode* node, const char* namePtr) {
 
 static NiAVObject* GetBlockByName(NiNode* node, const char* name) {
 	if (!node || !name || !name[0]) return nullptr;
-	const char* namePtr = GetNiFixedString(name);
-	if (!namePtr) return nullptr;
-	InterlockedDecrement((volatile long*)(namePtr - 8));
-	if (*(long*)(namePtr - 8) <= 0) return nullptr;
-	return GetBlockByNameInternal(node, namePtr);
+	__try {
+		const char* namePtr = GetNiFixedString(name);
+		if (!namePtr) return nullptr;
+		InterlockedDecrement((volatile long*)(namePtr - 8));
+		if (*(long*)(namePtr - 8) <= 0) return nullptr;
+		return GetBlockByNameInternal(node, namePtr);
+	} __except(EXCEPTION_EXECUTE_HANDLER) {
+		return nullptr;
+	}
 }
 
 namespace Config {
@@ -328,6 +339,12 @@ static ActiveSubtitle g_activeSubtitles[MAX_SUBTITLES] = {};
 static Tile* g_fsRootTile = nullptr;
 static bool g_initialized = false;
 static bool g_disabled = false;
+static void* g_lastPlayerCell = nullptr;
+
+static void* GetParentCell(TESObjectREFR* ref) {
+	if (!ref) return nullptr;
+	return *(void**)((UInt8*)ref + 0x40);
+}
 
 static UInt32 g_traitX = 0;
 static UInt32 g_traitY = 0;
@@ -452,7 +469,10 @@ static void ProcessPendingSubtitles() {
 		if (InterlockedCompareExchange(&g_pending[i].state, 3, 2) == 2) {
 			Actor* speaker = g_pending[i].speaker;
 			const char* text = g_pending[i].text;
-			DWORD durationMs = (DWORD)(g_pending[i].duration * 1000.0f);
+			float durSec = g_pending[i].duration;
+			if (durSec < 0.5f) durSec = 0.5f;
+			if (durSec > 30.0f) durSec = 30.0f;
+			DWORD durationMs = (DWORD)(durSec * 1000.0f);
 
 			//check if speaker already has subtitle - replace it
 			int existing = FindSubtitleForSpeaker(speaker);
@@ -505,6 +525,7 @@ static void ProcessPendingSubtitles() {
 static void ResetState() {
 	g_initialized = false;
 	g_fsRootTile = nullptr;
+	g_lastPlayerCell = nullptr;
 	for (int i = 0; i < MAX_SUBTITLES; i++) {
 		g_activeSubtitles[i].tile = nullptr;
 		g_activeSubtitles[i].valid = false;
@@ -649,6 +670,13 @@ static void OnHUDUpdate() {
 	if (!player || !GetRefNiNode((TESObjectREFR*)player)) {
 		ResetState();
 		return;
+	}
+
+	//clear subtitles on cell change
+	void* currentCell = GetParentCell((TESObjectREFR*)player);
+	if (currentCell != g_lastPlayerCell) {
+		if (g_lastPlayerCell) HideAllSubtitles();
+		g_lastPlayerCell = currentCell;
 	}
 
 	//hide floating subtitles during dialogue menu
