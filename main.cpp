@@ -146,6 +146,11 @@ void Tile::SetString(UInt32 traitID, const char* str) {
 	if (value) ThisCall<void>(0xA0A300, value, str, true);
 }
 
+static bool GetLineOfSight(TESObjectREFR* from, TESObjectREFR* to) {
+	if (!from || !to) return false;
+	return ThisCall<bool>(0x88B880, from, 0, to, 1, 0, 0);
+}
+
 static void SafeWrite32(UInt32 addr, UInt32 data) {
 	DWORD oldProtect;
 	VirtualProtect((void*)addr, 4, PAGE_EXECUTE_READWRITE, &oldProtect);
@@ -320,7 +325,6 @@ namespace Config {
 		fMaxDistance = GetFloat("Settings", "fMaxDistance", fMaxDistance, path);
 		fFadeStartDistance = GetFloat("Settings", "fFadeStartDistance", fFadeStartDistance, path);
 		iOffScreenHandling = GetInt("Settings", "iOffScreenHandling", iOffScreenHandling, path);
-		Log("Config: fHeadOffset=%.1f fMaxDistance=%.1f", fHeadOffset, fMaxDistance);
 	}
 }
 
@@ -337,6 +341,8 @@ struct ActiveSubtitle {
 static const int MAX_SUBTITLES = 64;
 static ActiveSubtitle g_activeSubtitles[MAX_SUBTITLES] = {};
 static Tile* g_fsRootTile = nullptr;
+static Tile* g_fsOffScreenTile = nullptr;
+static Tile* g_fsOffScreenText = nullptr;
 static bool g_initialized = false;
 static bool g_disabled = false;
 static void* g_lastPlayerCell = nullptr;
@@ -351,6 +357,12 @@ static UInt32 g_traitY = 0;
 static UInt32 g_traitVisible = 0;
 static UInt32 g_traitAlpha = 0;
 static UInt32 g_traitText = 0;
+static UInt32 g_traitOffVisible = 0;
+static UInt32 g_traitOffText = 0;
+static UInt32 g_traitOffAlpha = 0;
+static UInt32 g_traitStdVisible = 0;
+static UInt32 g_traitStdAlpha = 0;
+static UInt32 g_traitStdString = 0;
 
 static void InitTraits() {
 	static bool done = false;
@@ -360,6 +372,12 @@ static void InitTraits() {
 	g_traitVisible = GetTraitID("_FSVisible");
 	g_traitAlpha = GetTraitID("_FSAlpha");
 	g_traitText = GetTraitID("_FSText");
+	g_traitOffVisible = GetTraitID("_FSOffVisible");
+	g_traitOffText = GetTraitID("_FSOffText");
+	g_traitOffAlpha = GetTraitID("_FSOffAlpha");
+	g_traitStdVisible = GetTraitID("visible");
+	g_traitStdAlpha = GetTraitID("alpha");
+	g_traitStdString = GetTraitID("string");
 	done = true;
 }
 
@@ -406,7 +424,6 @@ static bool IsDialogueMenuOpen() {
 }
 
 //callback from itr-nvse - receives ACTUAL speaker and duration
-static int g_callbackCount = 0;
 static void OnDialogueCallback(Actor* speaker, const char* text, float duration, TESTopicInfo* topicInfo, TESTopic* topic) {
 	if (!speaker || !text || !text[0]) return;
 
@@ -424,20 +441,6 @@ static void OnDialogueCallback(Actor* speaker, const char* text, float duration,
 
 	//skip player speech
 	if (((TESForm*)speaker)->refID == 0x14) return;
-
-	if (g_callbackCount < 30) {
-		bool topicValid = topic && IsFormValid((TESForm*)topic);
-		bool infoValid = topicInfo && IsFormValid((TESForm*)topicInfo);
-		UInt8 topicFlags = topicValid ? *(UInt8*)((UInt8*)topic + 0x25) : 0xFF;
-		float topicPriority = topicValid ? *(float*)((UInt8*)topic + 0x28) : 0.0f;
-		const char* topicName = topicValid ? *(const char**)((UInt8*)topic + 0x1C) : "null";
-		UInt8 infoFlags1 = infoValid ? *(UInt8*)((UInt8*)topicInfo + 0x25) : 0xFF;
-		UInt8 infoFlags2 = infoValid ? *(UInt8*)((UInt8*)topicInfo + 0x26) : 0xFF;
-		Log("OnDialogue: name=%s tFlags=0x%02X pri=%.0f iFlags=0x%02X/0x%02X text=%.30s",
-			topicName ? topicName : "null", topicFlags, topicPriority,
-			infoFlags1, infoFlags2, text);
-		g_callbackCount++;
-	}
 
 	//queue for main thread processing
 	for (int i = 0; i < 16; i++) {
@@ -525,6 +528,8 @@ static void ProcessPendingSubtitles() {
 static void ResetState() {
 	g_initialized = false;
 	g_fsRootTile = nullptr;
+	g_fsOffScreenTile = nullptr;
+	g_fsOffScreenText = nullptr;
 	g_lastPlayerCell = nullptr;
 	for (int i = 0; i < MAX_SUBTITLES; i++) {
 		g_activeSubtitles[i].tile = nullptr;
@@ -556,12 +561,16 @@ static void InitFloatingSubtitles() {
 		return;
 	}
 
+	g_fsOffScreenTile = GetTileChild(g_fsRootTile, "FSOffScreen");
+	if (g_fsOffScreenTile) {
+		g_fsOffScreenText = GetTileChild(g_fsOffScreenTile, "FSOffText");
+	}
+
 	InitTraits();
 	g_initialized = true;
 	Log("Floating subtitles initialized");
 }
 
-static int g_posLogCount = 0;
 
 static void UpdateSubtitlePositions() {
 	if (!g_initialized || !g_fsRootTile || g_disabled) return;
@@ -569,6 +578,10 @@ static void UpdateSubtitlePositions() {
 
 	PlayerCharacter* player = *g_thePlayer;
 	if (!player) return;
+
+	//track closest off-screen speaker
+	int offScreenIdx = -1;
+	float offScreenDist = 999999.0f;
 
 	for (int i = 0; i < MAX_SUBTITLES; i++) {
 		ActiveSubtitle& sub = g_activeSubtitles[i];
@@ -620,9 +633,24 @@ static void UpdateSubtitlePositions() {
 			continue;
 		}
 
+		//check if player has line of sight to actor
+		bool hasLOS = GetLineOfSight((TESObjectREFR*)player, (TESObjectREFR*)sub.actor);
+
 		//project to screen
 		NiPoint3 screenPos;
-		g_JG_WorldToScreen(&worldPos, &screenPos, Config::iOffScreenHandling);
+		g_JG_WorldToScreen(&worldPos, &screenPos, 0);
+
+		if (!hasLOS) {
+			//no line of sight - show in off-screen tile instead
+			sub.tile->SetFloat(g_traitX, -10.0f);
+			sub.tile->SetFloat(g_traitY, -10.0f);
+			sub.tile->SetFloat(g_traitVisible, 0.0f);
+			if (dist < offScreenDist) {
+				offScreenDist = dist;
+				offScreenIdx = i;
+			}
+			continue;
+		}
 
 		//fade by distance
 		float alpha = 255.0f;
@@ -632,18 +660,28 @@ static void UpdateSubtitlePositions() {
 			alpha = 255.0f * (1.0f - fadePct);
 		}
 
-		if (g_posLogCount < 20) {
-			Log("Update[%d]: actor=%08X pos=(%.1f,%.1f,%.1f) screen=(%.3f,%.3f)",
-				i, ((TESForm*)sub.actor)->refID, worldPos.x, worldPos.y, worldPos.z,
-				screenPos.x, screenPos.y);
-			g_posLogCount++;
-		}
-
 		sub.tile->SetFloat(g_traitX, screenPos.x);
 		sub.tile->SetFloat(g_traitY, screenPos.y);
 		sub.tile->SetFloat(g_traitAlpha, alpha);
 		sub.tile->SetFloat(g_traitVisible, 1.0f);
 		sub.tile->SetString(g_traitText, sub.text);
+	}
+
+	//show closest off-screen speaker in bottom tile
+	if (offScreenIdx >= 0 && g_fsOffScreenTile && g_fsOffScreenText) {
+		ActiveSubtitle& offSub = g_activeSubtitles[offScreenIdx];
+		float alpha = 255.0f;
+		if (offScreenDist > Config::fFadeStartDistance) {
+			float fadeRange = Config::fMaxDistance - Config::fFadeStartDistance;
+			float fadePct = (offScreenDist - Config::fFadeStartDistance) / fadeRange;
+			alpha = 255.0f * (1.0f - fadePct);
+		}
+		g_fsOffScreenTile->SetFloat(g_traitStdVisible, 1.0f);
+		g_fsOffScreenTile->SetFloat(g_traitStdAlpha, alpha);
+		g_fsOffScreenText->SetString(g_traitStdString, offSub.text);
+		g_fsOffScreenText->SetFloat(g_traitStdAlpha, alpha);
+	} else if (g_fsOffScreenTile) {
+		g_fsOffScreenTile->SetFloat(g_traitStdVisible, 0.0f);
 	}
 }
 
@@ -654,6 +692,9 @@ static void HideAllSubtitles() {
 		if (g_activeSubtitles[i].tile) {
 			g_activeSubtitles[i].tile->SetFloat(g_traitVisible, 0.0f);
 		}
+	}
+	if (g_fsOffScreenTile) {
+		g_fsOffScreenTile->SetFloat(g_traitStdVisible, 0.0f);
 	}
 }
 
