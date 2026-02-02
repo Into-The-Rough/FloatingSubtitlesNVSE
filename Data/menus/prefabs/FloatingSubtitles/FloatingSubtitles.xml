@@ -1,0 +1,354 @@
+<?xml version="1.0"?>
+<!--
+	FloatingSubtitles UI Template
+	Add <include src="FloatingSubtitles\FloatingSubtitles.xml"/> to your HUDMainMenu.xml
+	inside the <rect name="HUDMainMenu"> element
+-->
+<rect name="FloatingSubtitles">
+	<visible>&true;</visible>
+	<locus>&true;</locus>
+	<depth>50</depth>
+
+	<!-- Subtitle template - cloned for each active subtitle -->
+	<rect name="FSSubtitle0">
+		<id>1100</id>
+		<visible><copy src="me()" trait="_FSVisible"/></visible>
+		<depth>51</depth>
+		<x><copy src="me()" trait="_FSX"/></x>
+		<y><copy src="me()" trait="_FSY"/></y>
+		<alpha><copy src="me()" trait="_FSAlpha"/></alpha>
+
+		<!-- Background -->
+		<image name="FSBackground">
+			<filename>interface\shared\black.dds</filename>
+			<alpha>180</alpha>
+			<width>400</width>
+			<height>80</height>
+			<x>-200</x>
+			<y>-10</y>
+		</image>
+
+		<!-- Speaker name -->
+		<text name="FSSpeakerText">
+			<font>3</font>
+			<red>255</red>
+			<green>200</green>
+			<blue>100</blue>
+			<x>0</x>
+			<y>-5</y>
+			<wrapwidth>380</wrapwidth>
+			<justify>&center;</justify>
+			<string><copy src="parent()" trait="_FSSpeaker"/></string>
+		</text>
+
+		<!-- Subtitle text -->
+		<text name="FSSubtitleText">
+			<font>4</font>
+			<red>255</red>
+			<green>255</green>
+			<blue>255</blue>
+			<x>0</x>
+			<y>15</y>
+			<wrapwidth>380</wrapwidth>
+			<justify>&center;</justify>
+			<string><copy src="parent()" trait="_FSText"/></string>
+		</text>
+
+		<!-- User traits for C++ -->
+		<user0 name="_FSX">0.5</user0>
+		<user1 name="_FSY">0.5</user1>
+		<user2 name="_FSZ">0</user2>
+		<user3 name="_FSVisible">0</user3>
+		<user4 name="_FSAlpha">255</user4>
+		<user5 name="_FSText"></user5>
+		<user6 name="_FSSpeaker"></user6>
+		<user7 name="_FSScale">1.0</user7>
+	</rect>
+
+	<rect name="FSSubtitle1">
+		<id>1101</id>
+		<visible><copy src="me()" trait="_FSVisible"/></visible>
+		<depth>52</depth>
+		<x><copy src="me()" trait="_FSX"/></x>
+		<y><copy src="me()" trait="_FSY"/></y>
+		<alpha><copy src="me()" trait="_FSAlpha"/></alpha>
+		<image name="FSBackground">
+			<filename>interface\shared\black.dds</filename>
+			<alpha>180</alpha>
+			<width>400</width>
+			<height>80</height>
+			<x>-200</x>
+			<y>-10</y>
+		</image>
+		<text name="FSSpeakerText">
+			<font>3</font>
+			<red>255</red><green>200</green><blue>100</blue>
+			<x>0</x><y>-5</y>
+			<wrapwidth>380</wrapwidth>
+			<justify>&center;</justify>
+			<string><copy src="parent()" trait="_FSSpeaker"/></string>
+		</text>
+		<text name="FSSubtitleText">
+			<font>4</font>
+			<red>255</red><green>255</green><blue>255</blue>
+			<x>0</x><y>15</y>
+			<wrapwidth>380</wrapwidth>
+			<justify>&center;</justify>
+			<string><copy src="parent()" trait="_FSText"/></string>
+		</text>
+		<user0 name="_FSX">0.5</user0>
+		<user1 name="_FSY">0.5</user1>
+		<user2 name="_FSZ">0</user2>
+		<user3 name="_FSVisible">0</user3>
+		<user4 name="_FSAlpha">255</user4>
+		<user5 name="_FSText"></user5>
+		<user6 name="_FSSpeaker"></user6>
+		<user7 name="_FSScale">1.0</user7>
+	</rect>
+
+	<rect name="FSSubtitle2">
+		<id>1102</id>
+		<visible><copy src="me()" trait="_FSVisible"/></visible>
+		<depth>53</depth>
+		<x><copy src="me()" trait="_FSX"/></x>
+		<y><copy src="me()" trait="_FSY"/></y>
+		<alpha><copy src="me()" trait="_FSAlpha"/></alpha>
+		<image name="FSBackground">
+			<filename>interface\shared\black.dds</filename>
+			<alpha>180</alpha>
+			<width>400</width>
+			<height>80</height>
+			<x>-200</x>
+			<y>-10</y>
+		</image>
+		<text name="FSSpeakerText">
+			<font>3</font>
+			<red>255</red><green>200</green><blue>100</blue>
+			<x>0</x><y>-5</y>
+			<wrapwidth>380</wrapwidth>
+			<justify>&center;</justify>
+			<string><copy src="parent()" trait="_FSSpeaker"/></string>
+		</text>
+		<text name="FSSubtitleText">
+			<font>4</font>
+			<red>255</red><green>255</green><blue>255</blue>
+			<x>0</x><y>15</y>
+			<wrapwidth>380</wrapwidth>
+			<justify>&center;</justify>
+			<string><copy src="parent()" trait="_FSText"/></string>
+		</text>
+		<user0 name="_FSX">0.5</user0>
+		<user1 name="_FSY">0.5</user1>
+		<user2 name="_FSZ">0</user2>
+		<user3 name="_FSVisible">0</user3>
+		<user4 name="_FSAlpha">255</user4>
+		<user5 name="_FSText"></user5>
+		<user6 name="_FSSpeaker"></user6>
+		<user7 name="_FSScale">1.0</user7>
+	</rect>
+
+	<rect name="FSSubtitle3">
+		<id>1103</id>
+		<visible><copy src="me()" trait="_FSVisible"/></visible>
+		<depth>54</depth>
+		<x><copy src="me()" trait="_FSX"/></x>
+		<y><copy src="me()" trait="_FSY"/></y>
+		<alpha><copy src="me()" trait="_FSAlpha"/></alpha>
+		<image name="FSBackground">
+			<filename>interface\shared\black.dds</filename>
+			<alpha>180</alpha>
+			<width>400</width>
+			<height>80</height>
+			<x>-200</x>
+			<y>-10</y>
+		</image>
+		<text name="FSSpeakerText">
+			<font>3</font>
+			<red>255</red><green>200</green><blue>100</blue>
+			<x>0</x><y>-5</y>
+			<wrapwidth>380</wrapwidth>
+			<justify>&center;</justify>
+			<string><copy src="parent()" trait="_FSSpeaker"/></string>
+		</text>
+		<text name="FSSubtitleText">
+			<font>4</font>
+			<red>255</red><green>255</green><blue>255</blue>
+			<x>0</x><y>15</y>
+			<wrapwidth>380</wrapwidth>
+			<justify>&center;</justify>
+			<string><copy src="parent()" trait="_FSText"/></string>
+		</text>
+		<user0 name="_FSX">0.5</user0>
+		<user1 name="_FSY">0.5</user1>
+		<user2 name="_FSZ">0</user2>
+		<user3 name="_FSVisible">0</user3>
+		<user4 name="_FSAlpha">255</user4>
+		<user5 name="_FSText"></user5>
+		<user6 name="_FSSpeaker"></user6>
+		<user7 name="_FSScale">1.0</user7>
+	</rect>
+
+	<rect name="FSSubtitle4">
+		<id>1104</id>
+		<visible><copy src="me()" trait="_FSVisible"/></visible>
+		<depth>55</depth>
+		<x><copy src="me()" trait="_FSX"/></x>
+		<y><copy src="me()" trait="_FSY"/></y>
+		<alpha><copy src="me()" trait="_FSAlpha"/></alpha>
+		<image name="FSBackground">
+			<filename>interface\shared\black.dds</filename>
+			<alpha>180</alpha>
+			<width>400</width>
+			<height>80</height>
+			<x>-200</x>
+			<y>-10</y>
+		</image>
+		<text name="FSSpeakerText">
+			<font>3</font>
+			<red>255</red><green>200</green><blue>100</blue>
+			<x>0</x><y>-5</y>
+			<wrapwidth>380</wrapwidth>
+			<justify>&center;</justify>
+			<string><copy src="parent()" trait="_FSSpeaker"/></string>
+		</text>
+		<text name="FSSubtitleText">
+			<font>4</font>
+			<red>255</red><green>255</green><blue>255</blue>
+			<x>0</x><y>15</y>
+			<wrapwidth>380</wrapwidth>
+			<justify>&center;</justify>
+			<string><copy src="parent()" trait="_FSText"/></string>
+		</text>
+		<user0 name="_FSX">0.5</user0>
+		<user1 name="_FSY">0.5</user1>
+		<user2 name="_FSZ">0</user2>
+		<user3 name="_FSVisible">0</user3>
+		<user4 name="_FSAlpha">255</user4>
+		<user5 name="_FSText"></user5>
+		<user6 name="_FSSpeaker"></user6>
+		<user7 name="_FSScale">1.0</user7>
+	</rect>
+
+	<rect name="FSSubtitle5">
+		<id>1105</id>
+		<visible><copy src="me()" trait="_FSVisible"/></visible>
+		<depth>56</depth>
+		<x><copy src="me()" trait="_FSX"/></x>
+		<y><copy src="me()" trait="_FSY"/></y>
+		<alpha><copy src="me()" trait="_FSAlpha"/></alpha>
+		<image name="FSBackground">
+			<filename>interface\shared\black.dds</filename>
+			<alpha>180</alpha>
+			<width>400</width>
+			<height>80</height>
+			<x>-200</x>
+			<y>-10</y>
+		</image>
+		<text name="FSSpeakerText">
+			<font>3</font>
+			<red>255</red><green>200</green><blue>100</blue>
+			<x>0</x><y>-5</y>
+			<wrapwidth>380</wrapwidth>
+			<justify>&center;</justify>
+			<string><copy src="parent()" trait="_FSSpeaker"/></string>
+		</text>
+		<text name="FSSubtitleText">
+			<font>4</font>
+			<red>255</red><green>255</green><blue>255</blue>
+			<x>0</x><y>15</y>
+			<wrapwidth>380</wrapwidth>
+			<justify>&center;</justify>
+			<string><copy src="parent()" trait="_FSText"/></string>
+		</text>
+		<user0 name="_FSX">0.5</user0>
+		<user1 name="_FSY">0.5</user1>
+		<user2 name="_FSZ">0</user2>
+		<user3 name="_FSVisible">0</user3>
+		<user4 name="_FSAlpha">255</user4>
+		<user5 name="_FSText"></user5>
+		<user6 name="_FSSpeaker"></user6>
+		<user7 name="_FSScale">1.0</user7>
+	</rect>
+
+	<rect name="FSSubtitle6">
+		<id>1106</id>
+		<visible><copy src="me()" trait="_FSVisible"/></visible>
+		<depth>57</depth>
+		<x><copy src="me()" trait="_FSX"/></x>
+		<y><copy src="me()" trait="_FSY"/></y>
+		<alpha><copy src="me()" trait="_FSAlpha"/></alpha>
+		<image name="FSBackground">
+			<filename>interface\shared\black.dds</filename>
+			<alpha>180</alpha>
+			<width>400</width>
+			<height>80</height>
+			<x>-200</x>
+			<y>-10</y>
+		</image>
+		<text name="FSSpeakerText">
+			<font>3</font>
+			<red>255</red><green>200</green><blue>100</blue>
+			<x>0</x><y>-5</y>
+			<wrapwidth>380</wrapwidth>
+			<justify>&center;</justify>
+			<string><copy src="parent()" trait="_FSSpeaker"/></string>
+		</text>
+		<text name="FSSubtitleText">
+			<font>4</font>
+			<red>255</red><green>255</green><blue>255</blue>
+			<x>0</x><y>15</y>
+			<wrapwidth>380</wrapwidth>
+			<justify>&center;</justify>
+			<string><copy src="parent()" trait="_FSText"/></string>
+		</text>
+		<user0 name="_FSX">0.5</user0>
+		<user1 name="_FSY">0.5</user1>
+		<user2 name="_FSZ">0</user2>
+		<user3 name="_FSVisible">0</user3>
+		<user4 name="_FSAlpha">255</user4>
+		<user5 name="_FSText"></user5>
+		<user6 name="_FSSpeaker"></user6>
+		<user7 name="_FSScale">1.0</user7>
+	</rect>
+
+	<rect name="FSSubtitle7">
+		<id>1107</id>
+		<visible><copy src="me()" trait="_FSVisible"/></visible>
+		<depth>58</depth>
+		<x><copy src="me()" trait="_FSX"/></x>
+		<y><copy src="me()" trait="_FSY"/></y>
+		<alpha><copy src="me()" trait="_FSAlpha"/></alpha>
+		<image name="FSBackground">
+			<filename>interface\shared\black.dds</filename>
+			<alpha>180</alpha>
+			<width>400</width>
+			<height>80</height>
+			<x>-200</x>
+			<y>-10</y>
+		</image>
+		<text name="FSSpeakerText">
+			<font>3</font>
+			<red>255</red><green>200</green><blue>100</blue>
+			<x>0</x><y>-5</y>
+			<wrapwidth>380</wrapwidth>
+			<justify>&center;</justify>
+			<string><copy src="parent()" trait="_FSSpeaker"/></string>
+		</text>
+		<text name="FSSubtitleText">
+			<font>4</font>
+			<red>255</red><green>255</green><blue>255</blue>
+			<x>0</x><y>15</y>
+			<wrapwidth>380</wrapwidth>
+			<justify>&center;</justify>
+			<string><copy src="parent()" trait="_FSText"/></string>
+		</text>
+		<user0 name="_FSX">0.5</user0>
+		<user1 name="_FSY">0.5</user1>
+		<user2 name="_FSZ">0</user2>
+		<user3 name="_FSVisible">0</user3>
+		<user4 name="_FSAlpha">255</user4>
+		<user5 name="_FSText"></user5>
+		<user6 name="_FSSpeaker"></user6>
+		<user7 name="_FSScale">1.0</user7>
+	</rect>
+</rect>

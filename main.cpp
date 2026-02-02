@@ -1,0 +1,742 @@
+#define _CRT_SECURE_NO_WARNINGS
+#include <Windows.h>
+#include <cstdio>
+#include <cmath>
+#include <string>
+
+typedef unsigned int UInt32;
+typedef unsigned short UInt16;
+typedef unsigned char UInt8;
+typedef int SInt32;
+typedef short SInt16;
+typedef char SInt8;
+
+struct NiPoint3 {
+	float x, y, z;
+	NiPoint3() : x(0), y(0), z(0) {}
+	NiPoint3(float _x, float _y, float _z) : x(_x), y(_y), z(_z) {}
+};
+
+struct NiNode;
+struct NiAVObject {
+	UInt8 pad00[0x8C];
+	float worldX;  //0x8C
+	float worldY;  //0x90
+	float worldZ;  //0x94
+};
+
+struct TESForm {
+	void* vtable;
+	UInt8 typeID;
+	UInt8 pad05[3];
+	UInt32 flags;
+	UInt32 refID;
+	UInt8 pad10[8];
+};
+
+struct TESObjectREFR : TESForm {
+	UInt8 pad18[0x18];
+	NiPoint3 pos;         //0x30
+	NiPoint3 rot;         //0x3C
+	UInt8 pad48[0x64 - 0x48];
+	void* renderState;    //0x64
+};
+
+struct Actor : TESObjectREFR {};
+
+struct PlayerCharacter : Actor {
+	UInt8 padActor[0x64F - sizeof(Actor)];
+	bool usingScope;
+};
+
+struct Tile;
+struct Menu {
+	void* vtable;
+	Tile* tile;
+};
+
+struct HUDMainMenu : Menu {
+	static HUDMainMenu* Get() { return *(HUDMainMenu**)0x11D96C0; }
+};
+
+struct TileValue {
+	UInt32 id;
+	void* parent;
+	float num;
+	char* str;
+	void* action;
+};
+
+struct Tile {
+	void* vtable;
+	UInt8 pad04[0x14 - 4];
+	const char* name;
+	Tile* parent;
+	void* children;
+
+	TileValue* GetValue(UInt32 traitID);
+	void SetFloat(UInt32 traitID, float val);
+	void SetString(UInt32 traitID, const char* str);
+	Tile* GetChild(const char* childName) {
+		return ((Tile*(__thiscall*)(Tile*, const char*))0xA03DA0)(this, childName);
+	}
+};
+
+struct PluginInfo {
+	enum { kInfoVersion = 1 };
+	UInt32 infoVersion;
+	const char* name;
+	UInt32 version;
+};
+
+struct NVSEInterface {
+	UInt32 nvseVersion;
+	UInt32 runtimeVersion;
+	UInt32 editorVersion;
+	UInt32 isEditor;
+	void* RegisterCommand;
+	void* SetOpcodeBase;
+	void* (*QueryInterface)(UInt32 id);
+	UInt32 (*GetPluginHandle)(void);
+	void* RegisterTypedCommand;
+	const char* (*GetRuntimeDirectory)(void);
+	UInt32 isNogore;
+};
+
+struct NVSEMessagingInterface {
+	UInt32 version;
+	void (*RegisterListener)(UInt32 pluginHandle, const char* sender, void* callback);
+	void* Dispatch;
+};
+
+struct NVSEMessage {
+	const char* sender;
+	UInt32 type;
+	UInt32 dataLen;
+	void* data;
+};
+
+enum { kMessage_PostLoad = 0, kMessage_ExitToMainMenu = 2, kMessage_PreLoadGame = 6, kMessage_PostLoadGame = 8, kMessage_PostPostLoad = 9, kMessage_NewGame = 14, kMessage_MainGameLoop = 20 };
+enum { kInterface_Messaging = 2 };
+
+#define EXTERN_DLL_EXPORT extern "C" __declspec(dllexport)
+
+template <typename T_Ret = void, typename ...Args>
+__forceinline T_Ret ThisCall(UInt32 addr, void* _this, Args ...args) {
+	return ((T_Ret(__thiscall*)(void*, Args...))addr)(_this, std::forward<Args>(args)...);
+}
+
+TileValue* Tile::GetValue(UInt32 traitID) {
+	return ThisCall<TileValue*>(0xA01000, this, traitID);
+}
+
+void Tile::SetFloat(UInt32 traitID, float val) {
+	TileValue* value = GetValue(traitID);
+	if (value) ThisCall<void>(0xA0A270, value, val, true);
+}
+
+void Tile::SetString(UInt32 traitID, const char* str) {
+	TileValue* value = GetValue(traitID);
+	if (value) ThisCall<void>(0xA0A300, value, str, true);
+}
+
+static void SafeWrite32(UInt32 addr, UInt32 data) {
+	DWORD oldProtect;
+	VirtualProtect((void*)addr, 4, PAGE_EXECUTE_READWRITE, &oldProtect);
+	*(UInt32*)addr = data;
+	VirtualProtect((void*)addr, 4, oldProtect, &oldProtect);
+}
+
+static void SafeWriteBuf(UInt32 addr, void* data, UInt32 len) {
+	DWORD oldProtect;
+	VirtualProtect((void*)addr, len, PAGE_EXECUTE_READWRITE, &oldProtect);
+	memcpy((void*)addr, data, len);
+	VirtualProtect((void*)addr, len, oldProtect, &oldProtect);
+}
+
+constexpr char PLUGIN_NAME[] = "FloatingSubtitlesNVSE";
+constexpr UInt32 PLUGIN_VERSION = 100;
+
+//forward declarations for itr-nvse types
+class TESTopicInfo;
+class TESTopic;
+
+//callback type from itr-nvse (duration in seconds)
+typedef void (*DTF_NativeCallback)(Actor* speaker, const char* text, float duration, TESTopicInfo* topicInfo, TESTopic* topic);
+typedef bool (*DTF_RegisterNativeCallback_t)(DTF_NativeCallback callback);
+
+namespace FloatingSubtitles {
+
+static NVSEMessagingInterface* g_messagingInterface = nullptr;
+static UInt32 g_pluginHandle = 0;
+static PlayerCharacter** g_thePlayer = (PlayerCharacter**)0x11DEA3C;
+static FILE* g_logFile = nullptr;
+static DTF_RegisterNativeCallback_t g_registerCallback = nullptr;
+static bool g_callbackRegistered = false;
+
+static void Log(const char* fmt, ...) {
+	if (!g_logFile) return;
+	va_list args;
+	va_start(args, fmt);
+	vfprintf(g_logFile, fmt, args);
+	fprintf(g_logFile, "\n");
+	fflush(g_logFile);
+	va_end(args);
+}
+
+typedef bool (__cdecl* JG_WorldToScreen_t)(NiPoint3* posXYZ, NiPoint3* posOut, int iOffscreenHandling);
+static JG_WorldToScreen_t g_JG_WorldToScreen = nullptr;
+static bool g_jgInitAttempted = false;
+
+static bool InitWorldToScreen() {
+	if (g_JG_WorldToScreen) return true;
+	if (g_jgInitAttempted) return false;
+	g_jgInitAttempted = true;
+
+	HMODULE jgModule = GetModuleHandleA("johnnyguitar.dll");
+	if (!jgModule) {
+		Log("JohnnyGuitar not found - floating subtitles disabled");
+		return false;
+	}
+
+	g_JG_WorldToScreen = (JG_WorldToScreen_t)GetProcAddress(jgModule, "JG_WorldToScreen");
+	if (g_JG_WorldToScreen) Log("JG_WorldToScreen initialized");
+	return g_JG_WorldToScreen != nullptr;
+}
+
+static UInt32 GetTraitID(const char* name) {
+	return ((UInt32(__cdecl*)(const char*, UInt32))0xA00940)(name, 0xFFFFFFFF);
+}
+
+static Tile* GetHUDMainMenuTile() {
+	HUDMainMenu* hud = HUDMainMenu::Get();
+	if (!hud) return nullptr;
+	return hud->tile;
+}
+
+static const char* GetTileName(Tile* tile) {
+	if (!tile) return nullptr;
+	return *(const char**)((char*)tile + 0x20);
+}
+
+static Tile* GetTileChild(Tile* tile, const char* name) {
+	if (!tile || !name) return nullptr;
+	return ThisCall<Tile*>(0xA03DA0, tile, name);
+}
+
+static Tile* ReadXML(Tile* parentTile, const char* path) {
+	if (!parentTile || !path) return nullptr;
+	return ThisCall<Tile*>(0xA01B00, parentTile, path);
+}
+
+static bool IsFormValid(TESForm* form) {
+	if (!form) return false;
+	if (form->refID == 0) return false;
+	if (form->flags & 0x20) return false;
+	if (form->flags & 0x800) return false;
+	return true;
+}
+
+static NiNode* GetRefNiNode(TESObjectREFR* ref) {
+	if (!ref) return nullptr;
+	void* renderState = *(void**)((UInt8*)ref + 0x64);
+	if (!renderState) return nullptr;
+	return *(NiNode**)((UInt8*)renderState + 0x14);
+}
+
+static const char* GetNiFixedString(const char* str) {
+	return ((const char* (__cdecl*)(const char*))0xA5B690)(str);
+}
+
+static NiAVObject* GetBlockByNameInternal(NiNode* node, const char* namePtr) {
+	if (!node) return nullptr;
+	const char* nodeName = *(const char**)((UInt8*)node + 0x8);
+	if (nodeName == namePtr) return (NiAVObject*)node;
+
+	UInt16 childCount = *(UInt16*)((UInt8*)node + 0xA6);
+	NiAVObject** children = *(NiAVObject***)((UInt8*)node + 0xA0);
+	if (!children || childCount == 0) return nullptr;
+
+	for (UInt16 i = 0; i < childCount; i++) {
+		NiAVObject* child = children[i];
+		if (!child) continue;
+		const char* childName = *(const char**)((UInt8*)child + 0x8);
+		if (childName == namePtr) return child;
+
+		void** vtable = *(void***)child;
+		typedef void* (__thiscall *IsNodeFn)(void*);
+		if (((IsNodeFn)vtable[0xC / 4])(child)) {
+			NiAVObject* result = GetBlockByNameInternal((NiNode*)child, namePtr);
+			if (result) return result;
+		}
+	}
+	return nullptr;
+}
+
+static NiAVObject* GetBlockByName(NiNode* node, const char* name) {
+	if (!node || !name || !name[0]) return nullptr;
+	const char* namePtr = GetNiFixedString(name);
+	if (!namePtr) return nullptr;
+	InterlockedDecrement((volatile long*)(namePtr - 8));
+	if (*(long*)(namePtr - 8) <= 0) return nullptr;
+	return GetBlockByNameInternal(node, namePtr);
+}
+
+namespace Config {
+	float fHeadOffset = 20.0f;
+	float fMaxDistance = 2048.0f;
+	float fFadeStartDistance = 1536.0f;
+	int iOffScreenHandling = 0;
+
+	static float GetFloat(const char* section, const char* key, float def, const char* path) {
+		char buf[32];
+		GetPrivateProfileStringA(section, key, "", buf, sizeof(buf), path);
+		return buf[0] ? (float)atof(buf) : def;
+	}
+
+	static int GetInt(const char* section, const char* key, int def, const char* path) {
+		return GetPrivateProfileIntA(section, key, def, path);
+	}
+
+	void Load(const char* path) {
+		fHeadOffset = GetFloat("Settings", "fHeadOffset", fHeadOffset, path);
+		fMaxDistance = GetFloat("Settings", "fMaxDistance", fMaxDistance, path);
+		fFadeStartDistance = GetFloat("Settings", "fFadeStartDistance", fFadeStartDistance, path);
+		iOffScreenHandling = GetInt("Settings", "iOffScreenHandling", iOffScreenHandling, path);
+		Log("Config: fHeadOffset=%.1f fMaxDistance=%.1f", fHeadOffset, fMaxDistance);
+	}
+}
+
+//subtitle with actor tracking
+struct ActiveSubtitle {
+	Actor* actor;        //actual speaker ref from itr-nvse callback
+	char text[512];
+	DWORD timeAdded;     //GetTickCount() when added
+	DWORD duration;      //duration in milliseconds
+	bool valid;
+};
+
+static const int MAX_SUBTITLES = 4;
+static ActiveSubtitle g_activeSubtitles[MAX_SUBTITLES] = {};
+static Tile* g_fsRootTile = nullptr;
+static Tile* g_subtitleTiles[MAX_SUBTITLES] = {};
+static bool g_initialized = false;
+static bool g_disabled = false;
+
+static UInt32 g_traitX = 0;
+static UInt32 g_traitY = 0;
+static UInt32 g_traitVisible = 0;
+static UInt32 g_traitAlpha = 0;
+static UInt32 g_traitText = 0;
+
+static void InitTraits() {
+	static bool done = false;
+	if (done) return;
+	g_traitX = GetTraitID("_X");
+	g_traitY = GetTraitID("_Y");
+	g_traitVisible = GetTraitID("_FSVisible");
+	g_traitAlpha = GetTraitID("_FSAlpha");
+	g_traitText = GetTraitID("_FSText");
+	done = true;
+}
+
+static int FindSubtitleForSpeaker(Actor* speaker) {
+	if (!speaker) return -1;
+	for (int i = 0; i < MAX_SUBTITLES; i++) {
+		if (!g_activeSubtitles[i].valid) continue;
+		if (g_activeSubtitles[i].actor == speaker) return i;
+	}
+	return -1;
+}
+
+//pending subtitle queue (callback may be called from different context)
+struct PendingSubtitle {
+	Actor* speaker;
+	char text[512];
+	float duration;      //duration in seconds from itr-nvse
+	volatile long state; //0=free, 1=writing, 2=ready
+};
+static PendingSubtitle g_pending[16] = {};
+
+//strip {voice directions} from subtitle text
+static void StripCurlyBraces(char* text) {
+	char* src = text;
+	char* dst = text;
+	while (*src) {
+		if (*src == '{') {
+			while (*src && *src != '}') src++;
+			if (*src == '}') src++;
+			while (*src == ' ') src++; //skip trailing space
+		} else {
+			*dst++ = *src++;
+		}
+	}
+	*dst = 0;
+}
+
+//callback from itr-nvse - receives ACTUAL speaker and duration
+static int g_callbackCount = 0;
+static void OnDialogueCallback(Actor* speaker, const char* text, float duration, TESTopicInfo* topicInfo, TESTopic* topic) {
+	if (!speaker || !text || !text[0]) return;
+
+	//skip player speech
+	if (IsFormValid((TESForm*)speaker) && ((TESForm*)speaker)->refID == 0x14) return;
+
+	if (g_callbackCount < 20) {
+		Log("OnDialogue: speaker=%p refID=%08X duration=%.2fs text=%.50s",
+			speaker, ((TESForm*)speaker)->refID, duration, text);
+		g_callbackCount++;
+	}
+
+	//queue for main thread processing
+	for (int i = 0; i < 16; i++) {
+		if (InterlockedCompareExchange(&g_pending[i].state, 1, 0) == 0) {
+			g_pending[i].speaker = speaker;
+			strncpy(g_pending[i].text, text, 511);
+			g_pending[i].text[511] = 0;
+			g_pending[i].duration = duration;
+			InterlockedExchange(&g_pending[i].state, 2);
+			return;
+		}
+	}
+}
+
+static void ProcessPendingSubtitles() {
+	DWORD now = GetTickCount();
+
+	for (int i = 0; i < 16; i++) {
+		if (InterlockedCompareExchange(&g_pending[i].state, 3, 2) == 2) {
+			Actor* speaker = g_pending[i].speaker;
+			const char* text = g_pending[i].text;
+			DWORD durationMs = (DWORD)(g_pending[i].duration * 1000.0f);
+
+			//check if speaker already has subtitle - replace it
+			int existing = FindSubtitleForSpeaker(speaker);
+			if (existing >= 0) {
+				strncpy(g_activeSubtitles[existing].text, text, 511);
+				g_activeSubtitles[existing].text[511] = 0;
+				StripCurlyBraces(g_activeSubtitles[existing].text);
+				g_activeSubtitles[existing].timeAdded = now;
+				g_activeSubtitles[existing].duration = durationMs;
+				InterlockedExchange(&g_pending[i].state, 0);
+				continue;
+			}
+
+			//find empty slot or oldest
+			int slot = -1;
+			DWORD oldestTime = now + 1;
+			int oldestSlot = 0;
+
+			for (int j = 0; j < MAX_SUBTITLES; j++) {
+				if (!g_activeSubtitles[j].valid) {
+					slot = j;
+					break;
+				}
+				if (g_activeSubtitles[j].timeAdded < oldestTime) {
+					oldestTime = g_activeSubtitles[j].timeAdded;
+					oldestSlot = j;
+				}
+			}
+
+			if (slot < 0) slot = oldestSlot;
+
+			g_activeSubtitles[slot].actor = speaker;
+			strncpy(g_activeSubtitles[slot].text, text, 511);
+			g_activeSubtitles[slot].text[511] = 0;
+				StripCurlyBraces(g_activeSubtitles[slot].text);
+			g_activeSubtitles[slot].timeAdded = now;
+			g_activeSubtitles[slot].duration = durationMs;
+			g_activeSubtitles[slot].valid = true;
+
+			InterlockedExchange(&g_pending[i].state, 0);
+		}
+	}
+}
+
+static void ResetState() {
+	g_initialized = false;
+	g_fsRootTile = nullptr;
+	for (int i = 0; i < MAX_SUBTITLES; i++) {
+		g_subtitleTiles[i] = nullptr;
+		g_activeSubtitles[i].valid = false;
+		g_activeSubtitles[i].actor = nullptr;
+	}
+}
+
+static void InitFloatingSubtitles() {
+	if (g_initialized || g_disabled) return;
+
+	Tile* hudTile = GetHUDMainMenuTile();
+	if (!hudTile) return;
+
+	g_fsRootTile = GetTileChild(hudTile, "FloatingSubtitles");
+	if (!g_fsRootTile) {
+		g_fsRootTile = ReadXML(hudTile, "menus\\prefabs\\floatingsubtitles\\floatingsubtitles.xml");
+	}
+
+	if (!g_fsRootTile) {
+		Log("Failed to inject FloatingSubtitles tile");
+		g_disabled = true;
+		return;
+	}
+
+	InitTraits();
+
+	for (int i = 0; i < MAX_SUBTITLES; i++) {
+		char tileName[32];
+		sprintf(tileName, "FSSubtitle%d", i);
+		g_subtitleTiles[i] = GetTileChild(g_fsRootTile, tileName);
+		if (g_subtitleTiles[i]) {
+			g_subtitleTiles[i]->SetFloat(g_traitX, -1.0f);
+			g_subtitleTiles[i]->SetFloat(g_traitY, -1.0f);
+			g_subtitleTiles[i]->SetFloat(g_traitVisible, 0.0f);
+		}
+	}
+
+	g_initialized = true;
+	Log("Floating subtitles initialized");
+}
+
+static int g_posLogCount = 0;
+
+static void UpdateSubtitlePositions() {
+	if (!g_initialized || !g_fsRootTile || g_disabled) return;
+	if (!g_JG_WorldToScreen && !InitWorldToScreen()) return;
+
+	PlayerCharacter* player = *g_thePlayer;
+	if (!player) return;
+
+	for (int i = 0; i < MAX_SUBTITLES; i++) {
+		Tile* tile = g_subtitleTiles[i];
+		if (!tile) continue;
+
+		ActiveSubtitle& sub = g_activeSubtitles[i];
+
+		if (!sub.valid || !sub.actor) {
+			tile->SetFloat(g_traitX, -1.0f);
+			tile->SetFloat(g_traitY, -1.0f);
+			tile->SetFloat(g_traitVisible, 0.0f);
+			continue;
+		}
+
+		//check actor still valid
+		if (!IsFormValid((TESForm*)sub.actor)) {
+			sub.valid = false;
+			sub.actor = nullptr;
+			tile->SetFloat(g_traitVisible, 0.0f);
+			continue;
+		}
+
+		//get actor head position - track in real-time
+		NiPoint3 worldPos;
+		NiNode* niNode = GetRefNiNode((TESObjectREFR*)sub.actor);
+		if (niNode) {
+			NiAVObject* headBone = GetBlockByName(niNode, "Bip01 Head");
+			if (headBone) {
+				worldPos.x = headBone->worldX;
+				worldPos.y = headBone->worldY;
+				worldPos.z = headBone->worldZ + Config::fHeadOffset;
+			} else {
+				worldPos.x = sub.actor->pos.x;
+				worldPos.y = sub.actor->pos.y;
+				worldPos.z = sub.actor->pos.z + 100.0f + Config::fHeadOffset;
+			}
+		} else {
+			worldPos.x = sub.actor->pos.x;
+			worldPos.y = sub.actor->pos.y;
+			worldPos.z = sub.actor->pos.z + 100.0f + Config::fHeadOffset;
+		}
+
+		//distance check
+		float dx = worldPos.x - player->pos.x;
+		float dy = worldPos.y - player->pos.y;
+		float dz = worldPos.z - player->pos.z;
+		float dist = sqrtf(dx*dx + dy*dy + dz*dz);
+
+		if (dist > Config::fMaxDistance) {
+			tile->SetFloat(g_traitVisible, 0.0f);
+			continue;
+		}
+
+		//project to screen
+		NiPoint3 screenPos;
+		g_JG_WorldToScreen(&worldPos, &screenPos, Config::iOffScreenHandling);
+
+		//fade by distance
+		float alpha = 255.0f;
+		if (dist > Config::fFadeStartDistance) {
+			float fadeRange = Config::fMaxDistance - Config::fFadeStartDistance;
+			float fadePct = (dist - Config::fFadeStartDistance) / fadeRange;
+			alpha = 255.0f * (1.0f - fadePct);
+		}
+
+		if (g_posLogCount < 20) {
+			Log("Update[%d]: actor=%08X pos=(%.1f,%.1f,%.1f) screen=(%.3f,%.3f)",
+				i, ((TESForm*)sub.actor)->refID, worldPos.x, worldPos.y, worldPos.z,
+				screenPos.x, screenPos.y);
+			g_posLogCount++;
+		}
+
+		tile->SetFloat(g_traitX, screenPos.x);
+		tile->SetFloat(g_traitY, screenPos.y);
+		tile->SetFloat(g_traitAlpha, alpha);
+		tile->SetFloat(g_traitVisible, 1.0f);
+		tile->SetString(g_traitText, sub.text);
+	}
+}
+
+static void OnHUDUpdate() {
+	if (g_disabled || !g_initialized) return;
+
+	Tile* hudTile = GetHUDMainMenuTile();
+	if (!hudTile || !g_fsRootTile) {
+		ResetState();
+		return;
+	}
+
+	PlayerCharacter* player = *g_thePlayer;
+	if (!player || !GetRefNiNode((TESObjectREFR*)player)) {
+		ResetState();
+		return;
+	}
+
+	ProcessPendingSubtitles();
+	UpdateSubtitlePositions();
+
+	//expire subtitles based on their duration
+	DWORD now = GetTickCount();
+	for (int i = 0; i < MAX_SUBTITLES; i++) {
+		if (g_activeSubtitles[i].valid && (now - g_activeSubtitles[i].timeAdded) > g_activeSubtitles[i].duration) {
+			g_activeSubtitles[i].valid = false;
+			g_activeSubtitles[i].actor = nullptr;
+			if (g_subtitleTiles[i]) {
+				g_subtitleTiles[i]->SetFloat(g_traitVisible, 0.0f);
+			}
+		}
+	}
+}
+
+typedef void (__thiscall* HUDUpdate_t)(void* hud);
+static HUDUpdate_t g_originalHUDUpdate = nullptr;
+
+static void __fastcall HUDUpdateHook(void* hud, void* edx) {
+	if (g_originalHUDUpdate) g_originalHUDUpdate(hud);
+	OnHUDUpdate();
+}
+
+static void InstallHUDHook() {
+	constexpr UInt32 kVtbl_HUDMainMenu = 0x1072DF4;
+	UInt32 vtblAddr = kVtbl_HUDMainMenu + 11 * 4;
+	g_originalHUDUpdate = *(HUDUpdate_t*)vtblAddr;
+	SafeWrite32(vtblAddr, (UInt32)HUDUpdateHook);
+	Log("HUD update hook installed");
+}
+
+//suppress vanilla subtitles by patching AppendSubtitleData to return immediately
+//function is __thiscall with 36 bytes of stack params (text, BSSoundHandle, NiPoint3, speaker, instant)
+static void SuppressVanillaSubtitles() {
+	//HUDMainMenu::AppendSubtitleData: 7819216 decimal = 0x774FD0
+	//patch entry: xor al,al / ret 0x24 (returns 0, cleans 36 bytes)
+	constexpr UInt32 kAppendSubtitleData = 0x774FD0;
+	UInt8 patch[] = { 0x32, 0xC0, 0xC2, 0x24, 0x00 }; //xor al,al; ret 0x24
+	SafeWriteBuf(kAppendSubtitleData, patch, sizeof(patch));
+	Log("Vanilla subtitles suppressed");
+}
+
+static bool InitITRCallback() {
+	if (g_callbackRegistered) return true;
+
+	HMODULE itrModule = GetModuleHandleA("itr-nvse.dll");
+	if (!itrModule) {
+		Log("itr-nvse.dll not found - floating subtitles disabled");
+		return false;
+	}
+
+	g_registerCallback = (DTF_RegisterNativeCallback_t)GetProcAddress(itrModule, "DTF_RegisterNativeCallback");
+	if (!g_registerCallback) {
+		Log("DTF_RegisterNativeCallback not found in itr-nvse.dll");
+		return false;
+	}
+
+	if (g_registerCallback(OnDialogueCallback)) {
+		g_callbackRegistered = true;
+		Log("Registered dialogue callback with itr-nvse");
+		return true;
+	}
+
+	Log("Failed to register dialogue callback");
+	return false;
+}
+
+static void OnMainGameLoop() {
+	if (g_disabled) return;
+
+	//try to register callback if not done yet
+	if (!g_callbackRegistered) {
+		InitITRCallback();
+	}
+
+	if (!g_initialized) {
+		Tile* hudTile = GetHUDMainMenuTile();
+		if (!hudTile) return;
+
+		PlayerCharacter* player = *g_thePlayer;
+		if (!player || !GetRefNiNode((TESObjectREFR*)player)) return;
+
+		InitFloatingSubtitles();
+	}
+}
+
+static void MessageHandler(NVSEMessage* msg) {
+	switch (msg->type) {
+		case kMessage_PostPostLoad:
+			InstallHUDHook();
+			SuppressVanillaSubtitles();
+			break;
+		case kMessage_MainGameLoop:
+			OnMainGameLoop();
+			break;
+		case kMessage_PreLoadGame:
+		case kMessage_ExitToMainMenu:
+		case kMessage_PostLoadGame:
+			ResetState();
+			g_disabled = false;
+			break;
+	}
+}
+
+void Init(const NVSEInterface* nvse) {
+	char logPath[MAX_PATH];
+	sprintf(logPath, "%sFloatingSubtitlesNVSE.log", nvse->GetRuntimeDirectory());
+	g_logFile = fopen(logPath, "w");
+	Log("FloatingSubtitlesNVSE v%d initializing", PLUGIN_VERSION);
+
+	char iniPath[MAX_PATH];
+	sprintf(iniPath, "%sData\\config\\FloatingSubtitlesNVSE.ini", nvse->GetRuntimeDirectory());
+	Config::Load(iniPath);
+
+	g_pluginHandle = nvse->GetPluginHandle();
+	g_messagingInterface = (NVSEMessagingInterface*)nvse->QueryInterface(kInterface_Messaging);
+
+	if (g_messagingInterface) {
+		g_messagingInterface->RegisterListener(g_pluginHandle, "NVSE", (void*)MessageHandler);
+	}
+}
+
+} //namespace FloatingSubtitles
+
+EXTERN_DLL_EXPORT bool NVSEPlugin_Query(const NVSEInterface* nvse, PluginInfo* info) {
+	info->infoVersion = PluginInfo::kInfoVersion;
+	info->name = PLUGIN_NAME;
+	info->version = PLUGIN_VERSION;
+	return !nvse->isEditor;
+}
+
+EXTERN_DLL_EXPORT bool NVSEPlugin_Load(const NVSEInterface* nvse) {
+	FloatingSubtitles::Init(nvse);
+	return true;
+}
+
+BOOL WINAPI DllMain(HANDLE hDllHandle, DWORD dwReason, LPVOID lpreserved) {
+	return TRUE;
+}
