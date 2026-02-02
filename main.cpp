@@ -53,6 +53,8 @@ struct Tile;
 struct Menu {
 	void* vtable;
 	Tile* tile;
+
+	Tile* AddTileFromTemplate(Tile* destTile, const char* templateName);
 };
 
 struct HUDMainMenu : Menu {
@@ -124,6 +126,10 @@ enum { kInterface_Messaging = 2 };
 template <typename T_Ret = void, typename ...Args>
 __forceinline T_Ret ThisCall(UInt32 addr, void* _this, Args ...args) {
 	return ((T_Ret(__thiscall*)(void*, Args...))addr)(_this, std::forward<Args>(args)...);
+}
+
+Tile* Menu::AddTileFromTemplate(Tile* destTile, const char* templateName) {
+	return ThisCall<Tile*>(0xA1DDB0, this, destTile, templateName, 0);
 }
 
 TileValue* Tile::GetValue(UInt32 traitID) {
@@ -307,19 +313,19 @@ namespace Config {
 	}
 }
 
-//subtitle with actor tracking
+//subtitle with actor tracking and its own tile
 struct ActiveSubtitle {
 	Actor* actor;        //actual speaker ref from itr-nvse callback
+	Tile* tile;          //dynamically created tile
 	char text[512];
 	DWORD timeAdded;     //GetTickCount() when added
 	DWORD duration;      //duration in milliseconds
 	bool valid;
 };
 
-static const int MAX_SUBTITLES = 4;
+static const int MAX_SUBTITLES = 64;
 static ActiveSubtitle g_activeSubtitles[MAX_SUBTITLES] = {};
 static Tile* g_fsRootTile = nullptr;
-static Tile* g_subtitleTiles[MAX_SUBTITLES] = {};
 static bool g_initialized = false;
 static bool g_disabled = false;
 
@@ -390,12 +396,33 @@ static void OnDialogueCallback(Actor* speaker, const char* text, float duration,
 	//skip if in dialogue menu - game shows subtitles there already
 	if (IsDialogueMenuOpen()) return;
 
+	//skip dialogue-initiating greetings (flags1 bit 2 = 0x04)
+	if (topicInfo) {
+		UInt8 infoFlags1 = *(UInt8*)((UInt8*)topicInfo + 0x25);
+		if (infoFlags1 & 0x04) return;
+	}
+
 	//skip player speech
 	if (IsFormValid((TESForm*)speaker) && ((TESForm*)speaker)->refID == 0x14) return;
 
-	if (g_callbackCount < 20) {
-		Log("OnDialogue: speaker=%p refID=%08X duration=%.2fs text=%.50s",
-			speaker, ((TESForm*)speaker)->refID, duration, text);
+	if (g_callbackCount < 30) {
+		UInt8 topicType = topic ? *(UInt8*)((UInt8*)topic + 0x24) : 0xFF;
+		UInt8 topicFlags = topic ? *(UInt8*)((UInt8*)topic + 0x25) : 0xFF;
+		float topicPriority = topic ? *(float*)((UInt8*)topic + 0x28) : 0.0f;
+		const char* topicName = topic ? *(const char**)((UInt8*)topic + 0x1C) : "null";
+		UInt8 infoType = topicInfo ? *(UInt8*)((UInt8*)topicInfo + 0x23) : 0xFF;
+		UInt8 infoFlags1 = topicInfo ? *(UInt8*)((UInt8*)topicInfo + 0x25) : 0xFF;
+		UInt8 infoFlags2 = topicInfo ? *(UInt8*)((UInt8*)topicInfo + 0x26) : 0xFF;
+		//dump more bytes to find goodbye flag
+		Log("OnDialogue: name=%s tFlags=0x%02X pri=%.0f iFlags=0x%02X/0x%02X text=%.30s",
+			topicName ? topicName : "null", topicFlags, topicPriority,
+			infoFlags1, infoFlags2, text);
+		if (topicInfo) {
+			UInt8* p = (UInt8*)topicInfo;
+			Log("  info dump: %02X %02X %02X %02X %02X %02X %02X %02X | %02X %02X %02X %02X %02X %02X %02X %02X",
+				p[0x20], p[0x21], p[0x22], p[0x23], p[0x24], p[0x25], p[0x26], p[0x27],
+				p[0x28], p[0x29], p[0x2A], p[0x2B], p[0x2C], p[0x2D], p[0x2E], p[0x2F]);
+		}
 		g_callbackCount++;
 	}
 
@@ -411,6 +438,8 @@ static void OnDialogueCallback(Actor* speaker, const char* text, float duration,
 		}
 	}
 }
+
+static Tile* CreateSubtitleTile();
 
 static void ProcessPendingSubtitles() {
 	DWORD now = GetTickCount();
@@ -459,10 +488,15 @@ static void ProcessPendingSubtitles() {
 
 			if (slot < 0) slot = oldestSlot;
 
+			//create tile if needed
+			if (!g_activeSubtitles[slot].tile) {
+				g_activeSubtitles[slot].tile = CreateSubtitleTile();
+			}
+
 			g_activeSubtitles[slot].actor = speaker;
 			strncpy(g_activeSubtitles[slot].text, text, 511);
 			g_activeSubtitles[slot].text[511] = 0;
-				StripCurlyBraces(g_activeSubtitles[slot].text);
+			StripCurlyBraces(g_activeSubtitles[slot].text);
 			g_activeSubtitles[slot].timeAdded = now;
 			g_activeSubtitles[slot].duration = durationMs;
 			g_activeSubtitles[slot].valid = true;
@@ -476,10 +510,16 @@ static void ResetState() {
 	g_initialized = false;
 	g_fsRootTile = nullptr;
 	for (int i = 0; i < MAX_SUBTITLES; i++) {
-		g_subtitleTiles[i] = nullptr;
+		g_activeSubtitles[i].tile = nullptr;
 		g_activeSubtitles[i].valid = false;
 		g_activeSubtitles[i].actor = nullptr;
 	}
+}
+
+static Tile* CreateSubtitleTile() {
+	HUDMainMenu* hud = HUDMainMenu::Get();
+	if (!hud || !g_fsRootTile) return nullptr;
+	return hud->AddTileFromTemplate(g_fsRootTile, "FSSubtitle");
 }
 
 static void InitFloatingSubtitles() {
@@ -500,18 +540,6 @@ static void InitFloatingSubtitles() {
 	}
 
 	InitTraits();
-
-	for (int i = 0; i < MAX_SUBTITLES; i++) {
-		char tileName[32];
-		sprintf(tileName, "FSSubtitle%d", i);
-		g_subtitleTiles[i] = GetTileChild(g_fsRootTile, tileName);
-		if (g_subtitleTiles[i]) {
-			g_subtitleTiles[i]->SetFloat(g_traitX, -1.0f);
-			g_subtitleTiles[i]->SetFloat(g_traitY, -1.0f);
-			g_subtitleTiles[i]->SetFloat(g_traitVisible, 0.0f);
-		}
-	}
-
 	g_initialized = true;
 	Log("Floating subtitles initialized");
 }
@@ -526,15 +554,13 @@ static void UpdateSubtitlePositions() {
 	if (!player) return;
 
 	for (int i = 0; i < MAX_SUBTITLES; i++) {
-		Tile* tile = g_subtitleTiles[i];
-		if (!tile) continue;
-
 		ActiveSubtitle& sub = g_activeSubtitles[i];
+		if (!sub.tile) continue;
 
 		if (!sub.valid || !sub.actor) {
-			tile->SetFloat(g_traitX, -1.0f);
-			tile->SetFloat(g_traitY, -1.0f);
-			tile->SetFloat(g_traitVisible, 0.0f);
+			sub.tile->SetFloat(g_traitX, -1.0f);
+			sub.tile->SetFloat(g_traitY, -1.0f);
+			sub.tile->SetFloat(g_traitVisible, 0.0f);
 			continue;
 		}
 
@@ -542,7 +568,7 @@ static void UpdateSubtitlePositions() {
 		if (!IsFormValid((TESForm*)sub.actor)) {
 			sub.valid = false;
 			sub.actor = nullptr;
-			tile->SetFloat(g_traitVisible, 0.0f);
+			sub.tile->SetFloat(g_traitVisible, 0.0f);
 			continue;
 		}
 
@@ -573,7 +599,7 @@ static void UpdateSubtitlePositions() {
 		float dist = sqrtf(dx*dx + dy*dy + dz*dz);
 
 		if (dist > Config::fMaxDistance) {
-			tile->SetFloat(g_traitVisible, 0.0f);
+			sub.tile->SetFloat(g_traitVisible, 0.0f);
 			continue;
 		}
 
@@ -596,11 +622,11 @@ static void UpdateSubtitlePositions() {
 			g_posLogCount++;
 		}
 
-		tile->SetFloat(g_traitX, screenPos.x);
-		tile->SetFloat(g_traitY, screenPos.y);
-		tile->SetFloat(g_traitAlpha, alpha);
-		tile->SetFloat(g_traitVisible, 1.0f);
-		tile->SetString(g_traitText, sub.text);
+		sub.tile->SetFloat(g_traitX, screenPos.x);
+		sub.tile->SetFloat(g_traitY, screenPos.y);
+		sub.tile->SetFloat(g_traitAlpha, alpha);
+		sub.tile->SetFloat(g_traitVisible, 1.0f);
+		sub.tile->SetString(g_traitText, sub.text);
 	}
 }
 
@@ -608,8 +634,8 @@ static void HideAllSubtitles() {
 	for (int i = 0; i < MAX_SUBTITLES; i++) {
 		g_activeSubtitles[i].valid = false;
 		g_activeSubtitles[i].actor = nullptr;
-		if (g_subtitleTiles[i]) {
-			g_subtitleTiles[i]->SetFloat(g_traitVisible, 0.0f);
+		if (g_activeSubtitles[i].tile) {
+			g_activeSubtitles[i].tile->SetFloat(g_traitVisible, 0.0f);
 		}
 	}
 }
@@ -644,8 +670,8 @@ static void OnHUDUpdate() {
 		if (g_activeSubtitles[i].valid && (now - g_activeSubtitles[i].timeAdded) > g_activeSubtitles[i].duration) {
 			g_activeSubtitles[i].valid = false;
 			g_activeSubtitles[i].actor = nullptr;
-			if (g_subtitleTiles[i]) {
-				g_subtitleTiles[i]->SetFloat(g_traitVisible, 0.0f);
+			if (g_activeSubtitles[i].tile) {
+				g_activeSubtitles[i].tile->SetFloat(g_traitVisible, 0.0f);
 			}
 		}
 	}
