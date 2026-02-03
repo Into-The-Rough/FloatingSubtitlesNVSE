@@ -118,7 +118,7 @@ struct NVSEMessage {
 	void* data;
 };
 
-enum { kMessage_PostLoad = 0, kMessage_ExitToMainMenu = 2, kMessage_PreLoadGame = 6, kMessage_PostLoadGame = 8, kMessage_PostPostLoad = 9, kMessage_NewGame = 14, kMessage_MainGameLoop = 20 };
+enum { kMessage_PostLoad = 0, kMessage_ExitToMainMenu = 2, kMessage_PreLoadGame = 6, kMessage_PostLoadGame = 8, kMessage_PostPostLoad = 9, kMessage_NewGame = 14, kMessage_MainGameLoop = 20, kMessage_ReloadConfig = 21 };
 enum { kInterface_Messaging = 2 };
 
 #define EXTERN_DLL_EXPORT extern "C" __declspec(dllexport)
@@ -149,6 +149,21 @@ void Tile::SetString(UInt32 traitID, const char* str) {
 static bool GetLineOfSight(TESObjectREFR* from, TESObjectREFR* to) {
 	if (!from || !to) return false;
 	return ThisCall<bool>(0x88B880, from, 0, to, 1, 0, 0);
+}
+
+static const char* GetActorName(Actor* actor) {
+	if (!actor) return nullptr;
+	TESForm* baseForm = *(TESForm**)((UInt8*)actor + 0x20);
+	if (!baseForm) return nullptr;
+	//NPC_ (42) and Creature (43) have TESFullName at offset 0xD0 (0x34 * 4)
+	//string pointer at +4, length at +8
+	char** namePtr = (char**)((UInt8*)baseForm + 0xD0 + 4);
+	UInt16* lenPtr = (UInt16*)((UInt8*)baseForm + 0xD0 + 8);
+	if (*namePtr && *lenPtr > 0) {
+		const char* name = *namePtr;
+		if (name[0] && strcmp(name, "<no name>") != 0) return name;
+	}
+	return nullptr;
 }
 
 static void SafeWrite32(UInt32 addr, UInt32 data) {
@@ -184,6 +199,7 @@ static PlayerCharacter** g_thePlayer = (PlayerCharacter**)0x11DEA3C;
 static FILE* g_logFile = nullptr;
 static DTF_RegisterNativeCallback_t g_registerCallback = nullptr;
 static bool g_callbackRegistered = false;
+static char g_iniPath[MAX_PATH] = {};
 
 static void Log(const char* fmt, ...) {
 	if (!g_logFile) return;
@@ -311,6 +327,7 @@ namespace Config {
 	int iOffScreenHandling = 0;
 	int iFont = 3;
 	float fFontSize = 100.0f; //zoom percentage
+	bool bShowSpeakerName = true;
 
 	static float GetFloat(const char* section, const char* key, float def, const char* path) {
 		char buf[32];
@@ -329,6 +346,7 @@ namespace Config {
 		iOffScreenHandling = GetInt("Settings", "iOffScreenHandling", iOffScreenHandling, path);
 		iFont = GetInt("Settings", "iFont", iFont, path);
 		fFontSize = GetFloat("Settings", "fFontSize", fFontSize, path);
+		bShowSpeakerName = GetInt("Settings", "bShowSpeakerName", bShowSpeakerName ? 1 : 0, path) != 0;
 	}
 }
 
@@ -423,6 +441,18 @@ static void StripCurlyBraces(char* text) {
 	*dst = 0;
 }
 
+static void FormatSubtitleText(char* dest, int destSize, Actor* speaker, const char* text) {
+	if (Config::bShowSpeakerName) {
+		const char* name = GetActorName(speaker);
+		if (name && name[0]) {
+			snprintf(dest, destSize, "%s: %s", name, text);
+			return;
+		}
+	}
+	strncpy(dest, text, destSize - 1);
+	dest[destSize - 1] = 0;
+}
+
 //menu visibility array - index by menu type ID
 static UInt8* g_menuVisibility = (UInt8*)0x11F308F;
 static constexpr UInt32 kMenuType_Dialogue = 1009;
@@ -488,8 +518,7 @@ static void ProcessPendingSubtitles() {
 			//check if speaker already has subtitle - replace it
 			int existing = FindSubtitleForSpeaker(speaker);
 			if (existing >= 0) {
-				strncpy(g_activeSubtitles[existing].text, text, 511);
-				g_activeSubtitles[existing].text[511] = 0;
+				FormatSubtitleText(g_activeSubtitles[existing].text, 512, speaker, text);
 				StripCurlyBraces(g_activeSubtitles[existing].text);
 				g_activeSubtitles[existing].timeAdded = now;
 				g_activeSubtitles[existing].duration = durationMs;
@@ -521,8 +550,7 @@ static void ProcessPendingSubtitles() {
 			}
 
 			g_activeSubtitles[slot].actor = speaker;
-			strncpy(g_activeSubtitles[slot].text, text, 511);
-			g_activeSubtitles[slot].text[511] = 0;
+			FormatSubtitleText(g_activeSubtitles[slot].text, 512, speaker, text);
 			StripCurlyBraces(g_activeSubtitles[slot].text);
 			g_activeSubtitles[slot].timeAdded = now;
 			g_activeSubtitles[slot].duration = durationMs;
@@ -719,6 +747,23 @@ static void HideAllSubtitles() {
 	}
 }
 
+static void ApplyFontSettings() {
+	//apply font settings to all existing tiles
+	for (int i = 0; i < MAX_SUBTITLES; i++) {
+		if (g_activeSubtitles[i].tile) {
+			Tile* textTile = GetTileChild(g_activeSubtitles[i].tile, "FSText");
+			if (textTile) {
+				textTile->SetFloat(g_traitFont, (float)Config::iFont);
+				textTile->SetFloat(g_traitZoom, Config::fFontSize);
+			}
+		}
+	}
+	if (g_fsOffScreenText) {
+		g_fsOffScreenText->SetFloat(g_traitFont, (float)Config::iFont);
+		g_fsOffScreenText->SetFloat(g_traitZoom, Config::fFontSize);
+	}
+}
+
 static void OnHUDUpdate() {
 	if (g_disabled || !g_initialized) return;
 
@@ -849,6 +894,10 @@ static void MessageHandler(NVSEMessage* msg) {
 			ResetState();
 			g_disabled = false;
 			break;
+		case kMessage_ReloadConfig:
+			Config::Load(g_iniPath);
+			ApplyFontSettings();
+			break;
 	}
 }
 
@@ -858,9 +907,8 @@ void Init(const NVSEInterface* nvse) {
 	g_logFile = fopen(logPath, "w");
 	Log("FloatingSubtitlesNVSE v%d initializing", PLUGIN_VERSION);
 
-	char iniPath[MAX_PATH];
-	sprintf(iniPath, "%sData\\config\\FloatingSubtitlesNVSE.ini", nvse->GetRuntimeDirectory());
-	Config::Load(iniPath);
+	sprintf(g_iniPath, "%sData\\config\\FloatingSubtitlesNVSE.ini", nvse->GetRuntimeDirectory());
+	Config::Load(g_iniPath);
 
 	g_pluginHandle = nvse->GetPluginHandle();
 	g_messagingInterface = (NVSEMessagingInterface*)nvse->QueryInterface(kInterface_Messaging);
