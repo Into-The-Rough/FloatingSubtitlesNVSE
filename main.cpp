@@ -309,6 +309,8 @@ namespace Config {
 	float fMaxDistance = 2048.0f;
 	float fFadeStartDistance = 1536.0f;
 	int iOffScreenHandling = 0;
+	int iFont = 3;
+	float fFontSize = 100.0f; //zoom percentage
 
 	static float GetFloat(const char* section, const char* key, float def, const char* path) {
 		char buf[32];
@@ -325,6 +327,8 @@ namespace Config {
 		fMaxDistance = GetFloat("Settings", "fMaxDistance", fMaxDistance, path);
 		fFadeStartDistance = GetFloat("Settings", "fFadeStartDistance", fFadeStartDistance, path);
 		iOffScreenHandling = GetInt("Settings", "iOffScreenHandling", iOffScreenHandling, path);
+		iFont = GetInt("Settings", "iFont", iFont, path);
+		fFontSize = GetFloat("Settings", "fFontSize", fFontSize, path);
 	}
 }
 
@@ -363,6 +367,8 @@ static UInt32 g_traitOffAlpha = 0;
 static UInt32 g_traitStdVisible = 0;
 static UInt32 g_traitStdAlpha = 0;
 static UInt32 g_traitStdString = 0;
+static UInt32 g_traitFont = 0;
+static UInt32 g_traitZoom = 0;
 
 static void InitTraits() {
 	static bool done = false;
@@ -378,6 +384,8 @@ static void InitTraits() {
 	g_traitStdVisible = GetTraitID("visible");
 	g_traitStdAlpha = GetTraitID("alpha");
 	g_traitStdString = GetTraitID("string");
+	g_traitFont = GetTraitID("font");
+	g_traitZoom = GetTraitID("zoom");
 	done = true;
 }
 
@@ -541,7 +549,15 @@ static void ResetState() {
 static Tile* CreateSubtitleTile() {
 	HUDMainMenu* hud = HUDMainMenu::Get();
 	if (!hud || !g_fsRootTile) return nullptr;
-	return hud->AddTileFromTemplate(g_fsRootTile, "FSSubtitle");
+	Tile* tile = hud->AddTileFromTemplate(g_fsRootTile, "FSSubtitle");
+	if (tile) {
+		Tile* textTile = GetTileChild(tile, "FSText");
+		if (textTile) {
+			textTile->SetFloat(g_traitFont, (float)Config::iFont);
+			textTile->SetFloat(g_traitZoom, Config::fFontSize);
+		}
+	}
+	return tile;
 }
 
 static void InitFloatingSubtitles() {
@@ -561,12 +577,17 @@ static void InitFloatingSubtitles() {
 		return;
 	}
 
+	InitTraits();
+
 	g_fsOffScreenTile = GetTileChild(g_fsRootTile, "FSOffScreen");
 	if (g_fsOffScreenTile) {
 		g_fsOffScreenText = GetTileChild(g_fsOffScreenTile, "FSOffText");
+		if (g_fsOffScreenText) {
+			g_fsOffScreenText->SetFloat(g_traitFont, (float)Config::iFont);
+			g_fsOffScreenText->SetFloat(g_traitZoom, Config::fFontSize);
+		}
 	}
 
-	InitTraits();
 	g_initialized = true;
 	Log("Floating subtitles initialized");
 }
