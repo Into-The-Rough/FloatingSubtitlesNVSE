@@ -328,6 +328,7 @@ namespace Config {
 	int iFont = 3;
 	float fFontSize = 100.0f; //zoom percentage
 	bool bShowSpeakerName = true;
+	float fOffScreenY = 0.85f; //vertical position as screen fraction (0=top, 1=bottom)
 
 	static float GetFloat(const char* section, const char* key, float def, const char* path) {
 		char buf[32];
@@ -347,6 +348,7 @@ namespace Config {
 		iFont = GetInt("Settings", "iFont", iFont, path);
 		fFontSize = GetFloat("Settings", "fFontSize", fFontSize, path);
 		bShowSpeakerName = GetInt("Settings", "bShowSpeakerName", bShowSpeakerName ? 1 : 0, path) != 0;
+		fOffScreenY = GetFloat("Settings", "fOffScreenY", fOffScreenY, path);
 	}
 }
 
@@ -387,6 +389,8 @@ static UInt32 g_traitStdAlpha = 0;
 static UInt32 g_traitStdString = 0;
 static UInt32 g_traitFont = 0;
 static UInt32 g_traitZoom = 0;
+static UInt32 g_traitStdY = 0;
+static UInt32 g_traitOffY = 0;
 
 static void InitTraits() {
 	static bool done = false;
@@ -404,6 +408,8 @@ static void InitTraits() {
 	g_traitStdString = GetTraitID("string");
 	g_traitFont = GetTraitID("font");
 	g_traitZoom = GetTraitID("zoom");
+	g_traitStdY = GetTraitID("y");
+	g_traitOffY = GetTraitID("_FSOffY");
 	done = true;
 }
 
@@ -609,6 +615,7 @@ static void InitFloatingSubtitles() {
 
 	g_fsOffScreenTile = GetTileChild(g_fsRootTile, "FSOffScreen");
 	if (g_fsOffScreenTile) {
+		g_fsOffScreenTile->SetFloat(g_traitOffY, Config::fOffScreenY);
 		g_fsOffScreenText = GetTileChild(g_fsOffScreenTile, "FSOffText");
 		if (g_fsOffScreenText) {
 			g_fsOffScreenText->SetFloat(g_traitFont, (float)Config::iFont);
@@ -757,6 +764,9 @@ static void ApplyFontSettings() {
 				textTile->SetFloat(g_traitZoom, Config::fFontSize);
 			}
 		}
+	}
+	if (g_fsOffScreenTile) {
+		g_fsOffScreenTile->SetFloat(g_traitOffY, Config::fOffScreenY);
 	}
 	if (g_fsOffScreenText) {
 		g_fsOffScreenText->SetFloat(g_traitFont, (float)Config::iFont);
