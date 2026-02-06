@@ -232,6 +232,7 @@ static char g_iniPath[MAX_PATH] = {};
 static volatile bool g_narratorPending = false;
 static Actor* g_narratorActor = nullptr;
 static float g_narratorDuration = 5.0f;
+static volatile bool g_isLoading = false;
 
 static void Log(const char* fmt, ...) {
 	if (!g_logFile) return;
@@ -354,8 +355,8 @@ static NiAVObject* GetBlockByName(NiNode* node, const char* name) {
 
 namespace Config {
 	float fHeadOffset = 20.0f;
-	float fMaxDistance = 2048.0f;
-	float fFadeStartDistance = 1536.0f;
+	float fMaxDistance = 3000.0f;
+	float fFadeStartDistance = 2500.0f;
 	int iOffScreenHandling = 0;
 	int iFont = 3;
 	float fFontSize = 100.0f; //zoom percentage
@@ -460,6 +461,7 @@ struct PendingSubtitle {
 	Actor* speaker;
 	char text[512];
 	float duration;      //duration in seconds from itr-nvse
+	bool isNarrator;
 	volatile long state; //0=free, 1=writing, 2=ready
 };
 static PendingSubtitle g_pending[16] = {};
@@ -502,6 +504,8 @@ static bool IsDialogueMenuOpen() {
 
 //callback from itr-nvse - receives ACTUAL speaker and duration
 static void OnDialogueCallback(Actor* speaker, const char* text, float duration, TESTopicInfo* topicInfo, TESTopic* topic) {
+	if (g_isLoading) return;
+
 	if (!speaker || !text || !text[0]) {
 		Log("callback: rejected (null speaker/text)");
 		return;
@@ -545,6 +549,7 @@ static void OnDialogueCallback(Actor* speaker, const char* text, float duration,
 			strncpy(g_pending[i].text, text, 511);
 			g_pending[i].text[511] = 0;
 			g_pending[i].duration = duration;
+			g_pending[i].isNarrator = false;
 			InterlockedExchange(&g_pending[i].state, 2);
 			return;
 		}
@@ -585,7 +590,7 @@ static void ProcessPendingSubtitles() {
 			}
 
 			const char* text = g_pending[i].text;
-			bool narrator = IsNarratorActor(speaker);
+			bool narrator = g_pending[i].isNarrator;
 			Log("process: isNarrator=%d for 0x%08X", narrator, ((TESForm*)speaker)->refID);
 
 			//check if speaker already has subtitle - replace it
@@ -626,7 +631,7 @@ static void ProcessPendingSubtitles() {
 			g_activeSubtitles[slot].timeAdded = now;
 			g_activeSubtitles[slot].duration = durationMs;
 			g_activeSubtitles[slot].valid = true;
-			g_activeSubtitles[slot].isNarrator = IsNarratorActor(speaker);
+			g_activeSubtitles[slot].isNarrator = narrator;
 
 			InterlockedExchange(&g_pending[i].state, 0);
 		}
@@ -639,6 +644,11 @@ static void ResetState() {
 	g_fsOffScreenTile = nullptr;
 	g_fsOffScreenText = nullptr;
 	g_lastPlayerCell = nullptr;
+	g_narratorPending = false;
+	g_narratorActor = nullptr;
+	for (int i = 0; i < 16; i++) {
+		InterlockedExchange(&g_pending[i].state, 0);
+	}
 	for (int i = 0; i < MAX_SUBTITLES; i++) {
 		g_activeSubtitles[i].tile = nullptr;
 		g_activeSubtitles[i].valid = false;
@@ -916,6 +926,7 @@ static void InstallHUDHook() {
 //intercept AppendSubtitleData: capture narrator text for off-screen display, suppress everything else
 //0x774FD0 __thiscall(text, BSSoundHandle[12], NiPoint3, speaker, instant) ret 0x24
 static void __cdecl OnVanillaSubtitle(const char* text, TESObjectREFR* speaker) {
+	if (g_isLoading) return;
 	if (!text || !text[0]) return;
 	if (!g_narratorPending) return;
 	if (IsEmptyOrWhitespace(text)) return;
@@ -930,6 +941,7 @@ static void __cdecl OnVanillaSubtitle(const char* text, TESObjectREFR* speaker) 
 			strncpy(g_pending[i].text, text, 511);
 			g_pending[i].text[511] = 0;
 			g_pending[i].duration = g_narratorDuration;
+			g_pending[i].isNarrator = true;
 			InterlockedExchange(&g_pending[i].state, 2);
 			return;
 		}
@@ -1012,10 +1024,22 @@ static void MessageHandler(NVSEMessage* msg) {
 			OnMainGameLoop();
 			break;
 		case kMessage_PreLoadGame:
+			g_isLoading = true;
+			ResetState();
+			g_disabled = false;
+			break;
 		case kMessage_ExitToMainMenu:
+			g_isLoading = true;
+			ResetState();
+			g_disabled = false;
+			break;
 		case kMessage_PostLoadGame:
 			ResetState();
 			g_disabled = false;
+			g_isLoading = false;
+			break;
+		case kMessage_NewGame:
+			g_isLoading = false;
 			break;
 		case kMessage_ReloadConfig:
 			Config::Load(g_iniPath);
