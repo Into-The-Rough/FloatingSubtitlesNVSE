@@ -166,6 +166,35 @@ static const char* GetActorName(Actor* actor) {
 	return nullptr;
 }
 
+static const char* GetFormEditorID(TESForm* form) {
+	if (!form) return nullptr;
+	//vtable index 0x4C (offset 0x130) = GetEditorID
+	void** vtable = *(void***)form;
+	if (!vtable) return nullptr;
+	return ((const char*(__thiscall*)(void*))vtable[0x4C])(form);
+}
+
+static bool IsNarratorActor(Actor* actor) {
+	if (!actor) return false;
+	TESForm* baseForm = *(TESForm**)((UInt8*)actor + 0x20);
+	if (!baseForm) return false;
+	const char* edid = GetFormEditorID(baseForm);
+	if (!edid || !edid[0]) return false;
+	for (const char* p = edid; *p; p++) {
+		if (_strnicmp(p, "narrator", 8) == 0) return true;
+	}
+	return false;
+}
+
+static bool IsEmptyOrWhitespace(const char* str) {
+	if (!str) return true;
+	while (*str) {
+		if (*str != ' ' && *str != '\t' && *str != '\n' && *str != '\r') return false;
+		str++;
+	}
+	return true;
+}
+
 static void SafeWrite32(UInt32 addr, UInt32 data) {
 	DWORD oldProtect;
 	VirtualProtect((void*)addr, 4, PAGE_EXECUTE_READWRITE, &oldProtect);
@@ -200,6 +229,9 @@ static FILE* g_logFile = nullptr;
 static DTF_RegisterNativeCallback_t g_registerCallback = nullptr;
 static bool g_callbackRegistered = false;
 static char g_iniPath[MAX_PATH] = {};
+static volatile bool g_narratorPending = false;
+static Actor* g_narratorActor = nullptr;
+static float g_narratorDuration = 5.0f;
 
 static void Log(const char* fmt, ...) {
 	if (!g_logFile) return;
@@ -360,6 +392,7 @@ struct ActiveSubtitle {
 	DWORD timeAdded;     //GetTickCount() when added
 	DWORD duration;      //duration in milliseconds
 	bool valid;
+	bool isNarrator;
 };
 
 static const int MAX_SUBTITLES = 64;
@@ -469,24 +502,43 @@ static bool IsDialogueMenuOpen() {
 
 //callback from itr-nvse - receives ACTUAL speaker and duration
 static void OnDialogueCallback(Actor* speaker, const char* text, float duration, TESTopicInfo* topicInfo, TESTopic* topic) {
-	if (!speaker || !text || !text[0]) return;
+	if (!speaker || !text || !text[0]) {
+		Log("callback: rejected (null speaker/text)");
+		return;
+	}
 
-	//validate speaker before any access
-	if (!IsFormValid((TESForm*)speaker)) return;
+	if (!IsFormValid((TESForm*)speaker)) {
+		Log("callback: rejected (invalid form 0x%08X)", ((TESForm*)speaker)->refID);
+		return;
+	}
 
-	//skip if in dialogue menu - game shows subtitles there already
-	if (IsDialogueMenuOpen()) return;
+	if (IsDialogueMenuOpen()) {
+		Log("callback: rejected (dialogue menu open)");
+		return;
+	}
 
-	//skip dialogue-initiating greetings (flags1 bit 2 = 0x04)
+	if (((TESForm*)speaker)->refID == 0x14) return;
+
+	TESForm* baseForm = *(TESForm**)((UInt8*)speaker + 0x20);
+	const char* edid = baseForm ? GetFormEditorID(baseForm) : "null";
+	Log("callback: speaker=0x%08X edid='%s' text='%.80s' dur=%.2f", ((TESForm*)speaker)->refID, edid ? edid : "null", text, duration);
+
+	//narrator: don't queue {Do Not Record} text, just flag for vanilla capture
+	//check narrator BEFORE greeting flag so slideshow lines aren't rejected
+	if (IsNarratorActor(speaker)) {
+		g_narratorActor = speaker;
+		g_narratorDuration = duration;
+		g_narratorPending = true;
+		Log("callback: narrator flagged, waiting for vanilla text");
+		return;
+	}
+
+	//skip dialogue-initiating greetings (not applicable to narrators)
 	if (topicInfo && IsFormValid((TESForm*)topicInfo)) {
 		UInt8 infoFlags1 = *(UInt8*)((UInt8*)topicInfo + 0x25);
 		if (infoFlags1 & 0x04) return;
 	}
 
-	//skip player speech
-	if (((TESForm*)speaker)->refID == 0x14) return;
-
-	//queue for main thread processing
 	for (int i = 0; i < 16; i++) {
 		if (InterlockedCompareExchange(&g_pending[i].state, 1, 0) == 0) {
 			g_pending[i].speaker = speaker;
@@ -497,6 +549,7 @@ static void OnDialogueCallback(Actor* speaker, const char* text, float duration,
 			return;
 		}
 	}
+	Log("callback: no free pending slot!");
 }
 
 static Tile* CreateSubtitleTile();
@@ -515,17 +568,30 @@ static void ProcessPendingSubtitles() {
 	for (int i = 0; i < 16; i++) {
 		if (InterlockedCompareExchange(&g_pending[i].state, 3, 2) == 2) {
 			Actor* speaker = g_pending[i].speaker;
-			const char* text = g_pending[i].text;
 			float durSec = g_pending[i].duration;
 			if (durSec < 0.5f) durSec = 0.5f;
 			if (durSec > 30.0f) durSec = 30.0f;
 			DWORD durationMs = (DWORD)(durSec * 1000.0f);
 
+			//strip voice directions from raw text before formatting
+			StripCurlyBraces(g_pending[i].text);
+			Log("process: stripped text='%s'", g_pending[i].text);
+
+			//skip if text is empty after stripping (don't show bare "Name:")
+			if (IsEmptyOrWhitespace(g_pending[i].text)) {
+				Log("process: skipped empty text for 0x%08X", ((TESForm*)speaker)->refID);
+				InterlockedExchange(&g_pending[i].state, 0);
+				continue;
+			}
+
+			const char* text = g_pending[i].text;
+			bool narrator = IsNarratorActor(speaker);
+			Log("process: isNarrator=%d for 0x%08X", narrator, ((TESForm*)speaker)->refID);
+
 			//check if speaker already has subtitle - replace it
 			int existing = FindSubtitleForSpeaker(speaker);
 			if (existing >= 0) {
 				FormatSubtitleText(g_activeSubtitles[existing].text, 512, speaker, text);
-				StripCurlyBraces(g_activeSubtitles[existing].text);
 				g_activeSubtitles[existing].timeAdded = now;
 				g_activeSubtitles[existing].duration = durationMs;
 				InterlockedExchange(&g_pending[i].state, 0);
@@ -557,10 +623,10 @@ static void ProcessPendingSubtitles() {
 
 			g_activeSubtitles[slot].actor = speaker;
 			FormatSubtitleText(g_activeSubtitles[slot].text, 512, speaker, text);
-			StripCurlyBraces(g_activeSubtitles[slot].text);
 			g_activeSubtitles[slot].timeAdded = now;
 			g_activeSubtitles[slot].duration = durationMs;
 			g_activeSubtitles[slot].valid = true;
+			g_activeSubtitles[slot].isNarrator = IsNarratorActor(speaker);
 
 			InterlockedExchange(&g_pending[i].state, 0);
 		}
@@ -577,6 +643,7 @@ static void ResetState() {
 		g_activeSubtitles[i].tile = nullptr;
 		g_activeSubtitles[i].valid = false;
 		g_activeSubtitles[i].actor = nullptr;
+		g_activeSubtitles[i].isNarrator = false;
 	}
 }
 
@@ -658,6 +725,17 @@ static void UpdateSubtitlePositions() {
 			continue;
 		}
 
+		//narrators always go to off-screen display, skip distance/LOS
+		if (sub.isNarrator) {
+			Log("update: narrator slot %d -> off-screen, tile=%p offScreenTile=%p offScreenText=%p", i, sub.tile, g_fsOffScreenTile, g_fsOffScreenText);
+			sub.tile->SetFloat(g_traitX, -10.0f);
+			sub.tile->SetFloat(g_traitY, -10.0f);
+			sub.tile->SetFloat(g_traitVisible, 0.0f);
+			offScreenIdx = i;
+			offScreenDist = 0.0f;
+			continue;
+		}
+
 		//get actor head position - track in real-time
 		NiPoint3 worldPos;
 		NiNode* niNode = GetRefNiNode((TESObjectREFR*)sub.actor);
@@ -724,6 +802,7 @@ static void UpdateSubtitlePositions() {
 	}
 
 	//show closest off-screen speaker in bottom tile
+	Log("update: offScreenIdx=%d offScreenTile=%p offScreenText=%p", offScreenIdx, g_fsOffScreenTile, g_fsOffScreenText);
 	if (offScreenIdx >= 0 && g_fsOffScreenTile && g_fsOffScreenText) {
 		ActiveSubtitle& offSub = g_activeSubtitles[offScreenIdx];
 		float alpha = 255.0f;
@@ -834,15 +913,49 @@ static void InstallHUDHook() {
 	Log("HUD update hook installed");
 }
 
-//suppress vanilla subtitles by patching AppendSubtitleData to return immediately
-//function is __thiscall with 36 bytes of stack params (text, BSSoundHandle, NiPoint3, speaker, instant)
+//intercept AppendSubtitleData: capture narrator text for off-screen display, suppress everything else
+//0x774FD0 __thiscall(text, BSSoundHandle[12], NiPoint3, speaker, instant) ret 0x24
+static void __cdecl OnVanillaSubtitle(const char* text, TESObjectREFR* speaker) {
+	if (!text || !text[0]) return;
+	if (!g_narratorPending) return;
+	if (IsEmptyOrWhitespace(text)) return;
+
+	g_narratorPending = false;
+
+	Log("vanilla hook: captured narrator text='%.80s' dur=%.2f", text, g_narratorDuration);
+
+	for (int i = 0; i < 16; i++) {
+		if (InterlockedCompareExchange(&g_pending[i].state, 1, 0) == 0) {
+			g_pending[i].speaker = g_narratorActor;
+			strncpy(g_pending[i].text, text, 511);
+			g_pending[i].text[511] = 0;
+			g_pending[i].duration = g_narratorDuration;
+			InterlockedExchange(&g_pending[i].state, 2);
+			return;
+		}
+	}
+}
+
+static __declspec(naked) void AppendSubtitleHook() {
+	__asm {
+		mov eax, [esp+0x04]  //apText
+		mov edx, [esp+0x20]  //apSpeaker
+		push edx
+		push eax
+		call OnVanillaSubtitle
+		add esp, 8
+		xor al, al
+		ret 0x24
+	}
+}
+
 static void SuppressVanillaSubtitles() {
-	//HUDMainMenu::AppendSubtitleData: 7819216 decimal = 0x774FD0
-	//patch entry: xor al,al / ret 0x24 (returns 0, cleans 36 bytes)
 	constexpr UInt32 kAppendSubtitleData = 0x774FD0;
-	UInt8 patch[] = { 0x32, 0xC0, 0xC2, 0x24, 0x00 }; //xor al,al; ret 0x24
-	SafeWriteBuf(kAppendSubtitleData, patch, sizeof(patch));
-	Log("Vanilla subtitles suppressed");
+	UInt8 jmpPatch[5];
+	jmpPatch[0] = 0xE9;
+	*(UInt32*)(jmpPatch + 1) = (UInt32)AppendSubtitleHook - (kAppendSubtitleData + 5);
+	SafeWriteBuf(kAppendSubtitleData, jmpPatch, 5);
+	Log("Vanilla subtitle hook installed");
 }
 
 static bool InitITRCallback() {
