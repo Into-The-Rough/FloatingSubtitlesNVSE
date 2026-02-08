@@ -537,12 +537,6 @@ static void OnDialogueCallback(Actor* speaker, const char* text, float duration,
 		return;
 	}
 
-	//skip dialogue-initiating greetings (not applicable to narrators)
-	if (topicInfo && IsFormValid((TESForm*)topicInfo)) {
-		UInt8 infoFlags1 = *(UInt8*)((UInt8*)topicInfo + 0x25);
-		if (infoFlags1 & 0x04) return;
-	}
-
 	for (int i = 0; i < 16; i++) {
 		if (InterlockedCompareExchange(&g_pending[i].state, 1, 0) == 0) {
 			g_pending[i].speaker = speaker;
@@ -928,6 +922,17 @@ static void InstallHUDHook() {
 static void __cdecl OnVanillaSubtitle(const char* text, TESObjectREFR* speaker) {
 	if (g_isLoading) return;
 	if (!text || !text[0]) return;
+
+	//log all vanilla subtitle attempts so we can see what's not covered by itr-nvse
+	if (speaker) {
+		TESForm* baseForm = *(TESForm**)((UInt8*)speaker + 0x20);
+		const char* edid = baseForm ? GetFormEditorID(baseForm) : "null";
+		Log("vanilla: ref=0x%08X edid='%s' narratorPending=%d text='%.80s'",
+			((TESForm*)speaker)->refID, edid ? edid : "null", (int)g_narratorPending, text);
+	} else {
+		Log("vanilla: speaker=null narratorPending=%d text='%.80s'", (int)g_narratorPending, text);
+	}
+
 	if (!g_narratorPending) return;
 	if (IsEmptyOrWhitespace(text)) return;
 

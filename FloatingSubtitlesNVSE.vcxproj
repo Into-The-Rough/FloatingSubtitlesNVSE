@@ -95,6 +95,10 @@
     <ClCompile Include="main.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="CopyDLL" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="D:\Modding\VNV\mods\Floating Subtitles\NVSE\Plugins\" />
+    <Message Text="Copying DLL to mod folder..." Importance="high" />
+  </Target>
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
 </Project>
