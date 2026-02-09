@@ -230,7 +230,7 @@ static DTF_RegisterNativeCallback_t g_registerCallback = nullptr;
 static bool g_callbackRegistered = false;
 static char g_iniPath[MAX_PATH] = {};
 static volatile bool g_narratorPending = false;
-static Actor* g_narratorActor = nullptr;
+static Actor* g_narratorSpeaker = nullptr;
 static float g_narratorDuration = 5.0f;
 static volatile bool g_isLoading = false;
 
@@ -359,9 +359,11 @@ namespace Config {
 	float fFadeStartDistance = 2500.0f;
 	int iOffScreenHandling = 0;
 	int iFont = 3;
-	float fFontSize = 100.0f; //zoom percentage
+	float fFontSize = 100.0f;
 	bool bShowSpeakerName = true;
-	float fOffScreenY = 0.85f; //vertical position as screen fraction (0=top, 1=bottom)
+	float fOffScreenY = 0.85f;
+	bool bRequireLOS = false;
+	float fSubtitleScale = 1.0f;
 
 	static float GetFloat(const char* section, const char* key, float def, const char* path) {
 		char buf[32];
@@ -382,6 +384,8 @@ namespace Config {
 		fFontSize = GetFloat("Settings", "fFontSize", fFontSize, path);
 		bShowSpeakerName = GetInt("Settings", "bShowSpeakerName", bShowSpeakerName ? 1 : 0, path) != 0;
 		fOffScreenY = GetFloat("Settings", "fOffScreenY", fOffScreenY, path);
+		bRequireLOS = GetInt("Settings", "bRequireLOS", bRequireLOS ? 1 : 0, path) != 0;
+		fSubtitleScale = GetFloat("Settings", "fSubtitleScale", fSubtitleScale, path);
 	}
 }
 
@@ -460,7 +464,7 @@ static int FindSubtitleForSpeaker(Actor* speaker) {
 struct PendingSubtitle {
 	Actor* speaker;
 	char text[512];
-	float duration;      //duration in seconds from itr-nvse
+	float duration;
 	bool isNarrator;
 	volatile long state; //0=free, 1=writing, 2=ready
 };
@@ -502,40 +506,10 @@ static bool IsDialogueMenuOpen() {
 	return g_menuVisibility[kMenuType_Dialogue] != 0;
 }
 
-//callback from itr-nvse - receives ACTUAL speaker and duration
+//callback from itr-nvse - queue speaker pointer for main thread processing
 static void OnDialogueCallback(Actor* speaker, const char* text, float duration, TESTopicInfo* topicInfo, TESTopic* topic) {
 	if (g_isLoading) return;
-
-	if (!speaker || !text || !text[0]) {
-		Log("callback: rejected (null speaker/text)");
-		return;
-	}
-
-	if (!IsFormValid((TESForm*)speaker)) {
-		Log("callback: rejected (invalid form 0x%08X)", ((TESForm*)speaker)->refID);
-		return;
-	}
-
-	if (IsDialogueMenuOpen()) {
-		Log("callback: rejected (dialogue menu open)");
-		return;
-	}
-
-	if (((TESForm*)speaker)->refID == 0x14) return;
-
-	TESForm* baseForm = *(TESForm**)((UInt8*)speaker + 0x20);
-	const char* edid = baseForm ? GetFormEditorID(baseForm) : "null";
-	Log("callback: speaker=0x%08X edid='%s' text='%.80s' dur=%.2f", ((TESForm*)speaker)->refID, edid ? edid : "null", text, duration);
-
-	//narrator: don't queue {Do Not Record} text, just flag for vanilla capture
-	//check narrator BEFORE greeting flag so slideshow lines aren't rejected
-	if (IsNarratorActor(speaker)) {
-		g_narratorActor = speaker;
-		g_narratorDuration = duration;
-		g_narratorPending = true;
-		Log("callback: narrator flagged, waiting for vanilla text");
-		return;
-	}
+	if (!speaker || !text || !text[0]) return;
 
 	for (int i = 0; i < 16; i++) {
 		if (InterlockedCompareExchange(&g_pending[i].state, 1, 0) == 0) {
@@ -548,7 +522,6 @@ static void OnDialogueCallback(Actor* speaker, const char* text, float duration,
 			return;
 		}
 	}
-	Log("callback: no free pending slot!");
 }
 
 static Tile* CreateSubtitleTile();
@@ -567,6 +540,13 @@ static void ProcessPendingSubtitles() {
 	for (int i = 0; i < 16; i++) {
 		if (InterlockedCompareExchange(&g_pending[i].state, 3, 2) == 2) {
 			Actor* speaker = g_pending[i].speaker;
+
+			//validate speaker on main thread
+			if (!speaker || !IsFormValid((TESForm*)speaker)) {
+				InterlockedExchange(&g_pending[i].state, 0);
+				continue;
+			}
+
 			float durSec = g_pending[i].duration;
 			if (durSec < 0.5f) durSec = 0.5f;
 			if (durSec > 30.0f) durSec = 30.0f;
@@ -574,18 +554,24 @@ static void ProcessPendingSubtitles() {
 
 			//strip voice directions from raw text before formatting
 			StripCurlyBraces(g_pending[i].text);
-			Log("process: stripped text='%s'", g_pending[i].text);
 
 			//skip if text is empty after stripping (don't show bare "Name:")
 			if (IsEmptyOrWhitespace(g_pending[i].text)) {
-				Log("process: skipped empty text for 0x%08X", ((TESForm*)speaker)->refID);
 				InterlockedExchange(&g_pending[i].state, 0);
 				continue;
 			}
 
 			const char* text = g_pending[i].text;
+
+			//check narrator on main thread
 			bool narrator = g_pending[i].isNarrator;
-			Log("process: isNarrator=%d for 0x%08X", narrator, ((TESForm*)speaker)->refID);
+			if (!narrator && IsNarratorActor(speaker)) {
+				g_narratorSpeaker = speaker;
+				g_narratorDuration = durSec;
+				g_narratorPending = true;
+				InterlockedExchange(&g_pending[i].state, 0);
+				continue;
+			}
 
 			//check if speaker already has subtitle - replace it
 			int existing = FindSubtitleForSpeaker(speaker);
@@ -639,7 +625,7 @@ static void ResetState() {
 	g_fsOffScreenText = nullptr;
 	g_lastPlayerCell = nullptr;
 	g_narratorPending = false;
-	g_narratorActor = nullptr;
+	g_narratorSpeaker = nullptr;
 	for (int i = 0; i < 16; i++) {
 		InterlockedExchange(&g_pending[i].state, 0);
 	}
@@ -659,7 +645,7 @@ static Tile* CreateSubtitleTile() {
 		Tile* textTile = GetTileChild(tile, "FSText");
 		if (textTile) {
 			textTile->SetFloat(g_traitFont, (float)Config::iFont);
-			textTile->SetFloat(g_traitZoom, Config::fFontSize);
+			textTile->SetFloat(g_traitZoom, Config::fFontSize * Config::fSubtitleScale);
 		}
 	}
 	return tile;
@@ -690,7 +676,7 @@ static void InitFloatingSubtitles() {
 		g_fsOffScreenText = GetTileChild(g_fsOffScreenTile, "FSOffText");
 		if (g_fsOffScreenText) {
 			g_fsOffScreenText->SetFloat(g_traitFont, (float)Config::iFont);
-			g_fsOffScreenText->SetFloat(g_traitZoom, Config::fFontSize);
+			g_fsOffScreenText->SetFloat(g_traitZoom, Config::fFontSize * Config::fSubtitleScale);
 		}
 	}
 
@@ -698,6 +684,15 @@ static void InitFloatingSubtitles() {
 	Log("Floating subtitles initialized");
 }
 
+
+static float CalcFadeAlpha(float dist) {
+	if (dist <= Config::fFadeStartDistance) return 255.0f;
+	float fadeRange = Config::fMaxDistance - Config::fFadeStartDistance;
+	if (fadeRange <= 0.0f) return 255.0f;
+	float fadePct = (dist - Config::fFadeStartDistance) / fadeRange;
+	if (fadePct > 1.0f) fadePct = 1.0f;
+	return 255.0f * (1.0f - fadePct);
+}
 
 static void UpdateSubtitlePositions() {
 	if (!g_initialized || !g_fsRootTile || g_disabled) return;
@@ -731,7 +726,6 @@ static void UpdateSubtitlePositions() {
 
 		//narrators always go to off-screen display, skip distance/LOS
 		if (sub.isNarrator) {
-			Log("update: narrator slot %d -> off-screen, tile=%p offScreenTile=%p offScreenText=%p", i, sub.tile, g_fsOffScreenTile, g_fsOffScreenText);
 			sub.tile->SetFloat(g_traitX, -10.0f);
 			sub.tile->SetFloat(g_traitY, -10.0f);
 			sub.tile->SetFloat(g_traitVisible, 0.0f);
@@ -774,30 +768,28 @@ static void UpdateSubtitlePositions() {
 		//check if player has line of sight to actor
 		bool hasLOS = GetLineOfSight((TESObjectREFR*)player, (TESObjectREFR*)sub.actor);
 
-		//project to screen
+		//project to screen with configured off-screen handling
 		NiPoint3 screenPos;
-		g_JG_WorldToScreen(&worldPos, &screenPos, 0);
+		g_JG_WorldToScreen(&worldPos, &screenPos, Config::iOffScreenHandling);
 
 		if (!hasLOS) {
-			//no line of sight - show in off-screen tile instead
-			sub.tile->SetFloat(g_traitX, -10.0f);
-			sub.tile->SetFloat(g_traitY, -10.0f);
-			sub.tile->SetFloat(g_traitVisible, 0.0f);
-			if (dist < offScreenDist) {
-				offScreenDist = dist;
-				offScreenIdx = i;
+			if (Config::bRequireLOS) {
+				//LOS required - hide subtitle entirely when no LOS
+				sub.tile->SetFloat(g_traitVisible, 0.0f);
+			} else {
+				//no LOS - show in off-screen tile instead
+				sub.tile->SetFloat(g_traitX, -10.0f);
+				sub.tile->SetFloat(g_traitY, -10.0f);
+				sub.tile->SetFloat(g_traitVisible, 0.0f);
+				if (dist < offScreenDist) {
+					offScreenDist = dist;
+					offScreenIdx = i;
+				}
 			}
 			continue;
 		}
 
-		//fade by distance
-		float alpha = 255.0f;
-		if (dist > Config::fFadeStartDistance) {
-			float fadeRange = Config::fMaxDistance - Config::fFadeStartDistance;
-			float fadePct = (dist - Config::fFadeStartDistance) / fadeRange;
-			alpha = 255.0f * (1.0f - fadePct);
-		}
-
+		float alpha = CalcFadeAlpha(dist);
 		sub.tile->SetFloat(g_traitX, screenPos.x);
 		sub.tile->SetFloat(g_traitY, screenPos.y);
 		sub.tile->SetFloat(g_traitAlpha, alpha);
@@ -806,15 +798,9 @@ static void UpdateSubtitlePositions() {
 	}
 
 	//show closest off-screen speaker in bottom tile
-	Log("update: offScreenIdx=%d offScreenTile=%p offScreenText=%p", offScreenIdx, g_fsOffScreenTile, g_fsOffScreenText);
 	if (offScreenIdx >= 0 && g_fsOffScreenTile && g_fsOffScreenText) {
 		ActiveSubtitle& offSub = g_activeSubtitles[offScreenIdx];
-		float alpha = 255.0f;
-		if (offScreenDist > Config::fFadeStartDistance) {
-			float fadeRange = Config::fMaxDistance - Config::fFadeStartDistance;
-			float fadePct = (offScreenDist - Config::fFadeStartDistance) / fadeRange;
-			alpha = 255.0f * (1.0f - fadePct);
-		}
+		float alpha = CalcFadeAlpha(offScreenDist);
 		g_fsOffScreenTile->SetFloat(g_traitStdVisible, 1.0f);
 		g_fsOffScreenTile->SetFloat(g_traitStdAlpha, alpha);
 		g_fsOffScreenText->SetString(g_traitStdString, offSub.text);
@@ -838,13 +824,13 @@ static void HideAllSubtitles() {
 }
 
 static void ApplyFontSettings() {
-	//apply font settings to all existing tiles
+	float effectiveZoom = Config::fFontSize * Config::fSubtitleScale;
 	for (int i = 0; i < MAX_SUBTITLES; i++) {
 		if (g_activeSubtitles[i].tile) {
 			Tile* textTile = GetTileChild(g_activeSubtitles[i].tile, "FSText");
 			if (textTile) {
 				textTile->SetFloat(g_traitFont, (float)Config::iFont);
-				textTile->SetFloat(g_traitZoom, Config::fFontSize);
+				textTile->SetFloat(g_traitZoom, effectiveZoom);
 			}
 		}
 	}
@@ -853,7 +839,7 @@ static void ApplyFontSettings() {
 	}
 	if (g_fsOffScreenText) {
 		g_fsOffScreenText->SetFloat(g_traitFont, (float)Config::iFont);
-		g_fsOffScreenText->SetFloat(g_traitZoom, Config::fFontSize);
+		g_fsOffScreenText->SetFloat(g_traitZoom, effectiveZoom);
 	}
 }
 
@@ -922,32 +908,18 @@ static void InstallHUDHook() {
 static void __cdecl OnVanillaSubtitle(const char* text, TESObjectREFR* speaker) {
 	if (g_isLoading) return;
 	if (!text || !text[0]) return;
-
-	//log all vanilla subtitle attempts so we can see what's not covered by itr-nvse
-	if (speaker) {
-		TESForm* baseForm = *(TESForm**)((UInt8*)speaker + 0x20);
-		const char* edid = baseForm ? GetFormEditorID(baseForm) : "null";
-		Log("vanilla: ref=0x%08X edid='%s' narratorPending=%d text='%.80s'",
-			((TESForm*)speaker)->refID, edid ? edid : "null", (int)g_narratorPending, text);
-	} else {
-		Log("vanilla: speaker=null narratorPending=%d text='%.80s'", (int)g_narratorPending, text);
-	}
-
 	if (!g_narratorPending) return;
 	if (IsEmptyOrWhitespace(text)) return;
 
-	g_narratorPending = false;
-
-	Log("vanilla hook: captured narrator text='%.80s' dur=%.2f", text, g_narratorDuration);
-
 	for (int i = 0; i < 16; i++) {
 		if (InterlockedCompareExchange(&g_pending[i].state, 1, 0) == 0) {
-			g_pending[i].speaker = g_narratorActor;
+			g_pending[i].speaker = g_narratorSpeaker;
 			strncpy(g_pending[i].text, text, 511);
 			g_pending[i].text[511] = 0;
 			g_pending[i].duration = g_narratorDuration;
 			g_pending[i].isNarrator = true;
 			InterlockedExchange(&g_pending[i].state, 2);
+			g_narratorPending = false;
 			return;
 		}
 	}
@@ -1072,11 +1044,21 @@ void Init(const NVSEInterface* nvse) {
 
 } //namespace FloatingSubtitles
 
+constexpr UInt32 RUNTIME_VERSION_1_4_0_525 = 0x040020D0;
+
 EXTERN_DLL_EXPORT bool NVSEPlugin_Query(const NVSEInterface* nvse, PluginInfo* info) {
 	info->infoVersion = PluginInfo::kInfoVersion;
 	info->name = PLUGIN_NAME;
 	info->version = PLUGIN_VERSION;
-	return !nvse->isEditor;
+
+	if (nvse->isEditor) return false;
+
+	if (nvse->runtimeVersion != RUNTIME_VERSION_1_4_0_525) {
+		MessageBoxA(NULL, "FloatingSubtitlesNVSE requires Fallout New Vegas v1.4.0.525 (Steam). Other versions are not supported.", "Version Mismatch", MB_OK | MB_ICONWARNING);
+		return false;
+	}
+
+	return true;
 }
 
 EXTERN_DLL_EXPORT bool NVSEPlugin_Load(const NVSEInterface* nvse) {
