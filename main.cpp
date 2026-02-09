@@ -526,6 +526,7 @@ static void OnDialogueCallback(Actor* speaker, const char* text, float duration,
 }
 
 static Tile* CreateSubtitleTile();
+static void HideAllSubtitles();
 
 static void ProcessPendingSubtitles() {
 	DWORD now = GetTickCount();
@@ -619,7 +620,14 @@ static void ProcessPendingSubtitles() {
 	}
 }
 
-static void ResetState() {
+static void ResetState(bool hideTiles = true) {
+	if (hideTiles) {
+		HideAllSubtitles();
+		if (g_fsRootTile && g_traitStdVisible) {
+			g_fsRootTile->SetFloat(g_traitStdVisible, 0.0f);
+		}
+	}
+
 	g_initialized = false;
 	g_fsRootTile = nullptr;
 	g_fsOffScreenTile = nullptr;
@@ -849,13 +857,14 @@ static void OnHUDUpdate() {
 
 	Tile* hudTile = GetHUDMainMenuTile();
 	if (!hudTile || !g_fsRootTile) {
-		ResetState();
+		ResetState(false);
 		return;
 	}
 
 	PlayerCharacter* player = *g_thePlayer;
 	if (!player || !GetRefNiNode((TESObjectREFR*)player)) {
-		ResetState();
+		HideAllSubtitles();
+		g_lastPlayerCell = nullptr;
 		return;
 	}
 
@@ -1003,16 +1012,16 @@ static void MessageHandler(NVSEMessage* msg) {
 			break;
 		case kMessage_PreLoadGame:
 			g_isLoading = true;
-			ResetState();
+			ResetState(true);
 			g_disabled = false;
 			break;
 		case kMessage_ExitToMainMenu:
 			g_isLoading = true;
-			ResetState();
+			ResetState(true);
 			g_disabled = false;
 			break;
 		case kMessage_PostLoadGame:
-			ResetState();
+			ResetState(true);
 			g_disabled = false;
 			g_isLoading = false;
 			break;
