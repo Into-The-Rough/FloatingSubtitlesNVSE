@@ -376,6 +376,7 @@ namespace Config {
 	}
 
 	void Load(const char* path) {
+		WritePrivateProfileStringA(NULL, NULL, NULL, path); //flush INI cache
 		fHeadOffset = GetFloat("Settings", "fHeadOffset", fHeadOffset, path);
 		fMaxDistance = GetFloat("Settings", "fMaxDistance", fMaxDistance, path);
 		fFadeStartDistance = GetFloat("Settings", "fFadeStartDistance", fFadeStartDistance, path);
