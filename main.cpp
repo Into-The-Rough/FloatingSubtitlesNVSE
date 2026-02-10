@@ -118,7 +118,8 @@ struct NVSEMessage {
 	void* data;
 };
 
-enum { kMessage_PostLoad = 0, kMessage_ExitToMainMenu = 2, kMessage_PreLoadGame = 6, kMessage_PostLoadGame = 8, kMessage_PostPostLoad = 9, kMessage_NewGame = 14, kMessage_MainGameLoop = 20, kMessage_ReloadConfig = 21 };
+// Keep in sync with NVSEMessagingInterface message IDs (xNVSE kVersion=4).
+enum { kMessage_PostLoad = 0, kMessage_ExitToMainMenu = 2, kMessage_PreLoadGame = 6, kMessage_PostLoadGame = 8, kMessage_PostPostLoad = 9, kMessage_NewGame = 14, kMessage_MainGameLoop = 20, kMessage_ReloadConfig = 25 };
 enum { kInterface_Messaging = 2 };
 
 #define EXTERN_DLL_EXPORT extern "C" __declspec(dllexport)
@@ -364,6 +365,19 @@ namespace Config {
 	float fOffScreenY = 0.85f;
 	bool bRequireLOS = false;
 	float fSubtitleScale = 1.0f;
+	bool bSuppressMenuDialogueTail = true;
+	float fMenuDialogueTailSeconds = 1.2f;
+	bool bAnimateInterruptReplace = true;
+	float fInterruptAnimSeconds = 0.16f;
+	float fInterruptFadeFloor = 0.35f;
+	float fInterruptSlideNorm = 0.010f;
+	bool bFadeInNewSubtitles = true;
+	float fNewSubtitleFadeSeconds = 0.08f;
+	bool bResolveSubtitleOverlap = true;
+	float fOverlapBoxWidthNorm = 0.22f;
+	float fOverlapBoxHeightNorm = 0.08f;
+	float fOverlapPaddingNorm = 0.02f;
+	float fOverlapMaxShiftNorm = 0.20f;
 
 	static float GetFloat(const char* section, const char* key, float def, const char* path) {
 		char buf[32];
@@ -387,16 +401,54 @@ namespace Config {
 		fOffScreenY = GetFloat("Settings", "fOffScreenY", fOffScreenY, path);
 		bRequireLOS = GetInt("Settings", "bRequireLOS", bRequireLOS ? 1 : 0, path) != 0;
 		fSubtitleScale = GetFloat("Settings", "fSubtitleScale", fSubtitleScale, path);
+		bSuppressMenuDialogueTail = GetInt("Settings", "bSuppressMenuDialogueTail", bSuppressMenuDialogueTail ? 1 : 0, path) != 0;
+		fMenuDialogueTailSeconds = GetFloat("Settings", "fMenuDialogueTailSeconds", fMenuDialogueTailSeconds, path);
+		if (fMenuDialogueTailSeconds < 0.0f) fMenuDialogueTailSeconds = 0.0f;
+		if (fMenuDialogueTailSeconds > 5.0f) fMenuDialogueTailSeconds = 5.0f;
+		bAnimateInterruptReplace = GetInt("Settings", "bAnimateInterruptReplace", bAnimateInterruptReplace ? 1 : 0, path) != 0;
+		fInterruptAnimSeconds = GetFloat("Settings", "fInterruptAnimSeconds", fInterruptAnimSeconds, path);
+		fInterruptFadeFloor = GetFloat("Settings", "fInterruptFadeFloor", fInterruptFadeFloor, path);
+		fInterruptSlideNorm = GetFloat("Settings", "fInterruptSlideNorm", fInterruptSlideNorm, path);
+		if (fInterruptAnimSeconds < 0.05f) fInterruptAnimSeconds = 0.05f;
+		if (fInterruptAnimSeconds > 1.0f) fInterruptAnimSeconds = 1.0f;
+		if (fInterruptFadeFloor < 0.0f) fInterruptFadeFloor = 0.0f;
+		if (fInterruptFadeFloor > 0.95f) fInterruptFadeFloor = 0.95f;
+		if (fInterruptSlideNorm < 0.0f) fInterruptSlideNorm = 0.0f;
+		if (fInterruptSlideNorm > 0.08f) fInterruptSlideNorm = 0.08f;
+		bFadeInNewSubtitles = GetInt("Settings", "bFadeInNewSubtitles", bFadeInNewSubtitles ? 1 : 0, path) != 0;
+		fNewSubtitleFadeSeconds = GetFloat("Settings", "fNewSubtitleFadeSeconds", fNewSubtitleFadeSeconds, path);
+		if (fNewSubtitleFadeSeconds < 0.0f) fNewSubtitleFadeSeconds = 0.0f;
+		if (fNewSubtitleFadeSeconds > 1.0f) fNewSubtitleFadeSeconds = 1.0f;
+		bResolveSubtitleOverlap = GetInt("Settings", "bResolveSubtitleOverlap", bResolveSubtitleOverlap ? 1 : 0, path) != 0;
+		fOverlapBoxWidthNorm = GetFloat("Settings", "fOverlapBoxWidthNorm", fOverlapBoxWidthNorm, path);
+		fOverlapBoxHeightNorm = GetFloat("Settings", "fOverlapBoxHeightNorm", fOverlapBoxHeightNorm, path);
+		fOverlapPaddingNorm = GetFloat("Settings", "fOverlapPaddingNorm", fOverlapPaddingNorm, path);
+		fOverlapMaxShiftNorm = GetFloat("Settings", "fOverlapMaxShiftNorm", fOverlapMaxShiftNorm, path);
+		if (fOverlapBoxWidthNorm < 0.05f) fOverlapBoxWidthNorm = 0.05f;
+		if (fOverlapBoxWidthNorm > 0.60f) fOverlapBoxWidthNorm = 0.60f;
+		if (fOverlapBoxHeightNorm < 0.03f) fOverlapBoxHeightNorm = 0.03f;
+		if (fOverlapBoxHeightNorm > 0.30f) fOverlapBoxHeightNorm = 0.30f;
+		if (fOverlapPaddingNorm < 0.0f) fOverlapPaddingNorm = 0.0f;
+		if (fOverlapPaddingNorm > 0.20f) fOverlapPaddingNorm = 0.20f;
+		if (fOverlapMaxShiftNorm < 0.02f) fOverlapMaxShiftNorm = 0.02f;
+		if (fOverlapMaxShiftNorm > 0.45f) fOverlapMaxShiftNorm = 0.45f;
 	}
 }
 
 //subtitle with actor tracking and its own tile
 struct ActiveSubtitle {
 	Actor* actor;        //actual speaker ref from itr-nvse callback
+	UInt32 actorRefID;   //stable identity across transient actor pointers
 	Tile* tile;          //dynamically created tile
 	char text[512];
 	DWORD timeAdded;     //GetTickCount() when added
 	DWORD duration;      //duration in milliseconds
+	DWORD transitionStart;
+	DWORD transitionDuration;
+	bool transitionActive;
+	DWORD fadeInStart;
+	DWORD fadeInDuration;
+	bool fadeInActive;
 	bool valid;
 	bool isNarrator;
 };
@@ -454,9 +506,11 @@ static void InitTraits() {
 
 static int FindSubtitleForSpeaker(Actor* speaker) {
 	if (!speaker) return -1;
+	UInt32 refID = speaker->refID;
+	if (!refID) return -1;
 	for (int i = 0; i < MAX_SUBTITLES; i++) {
 		if (!g_activeSubtitles[i].valid) continue;
-		if (g_activeSubtitles[i].actor == speaker) return i;
+		if (g_activeSubtitles[i].actorRefID == refID) return i;
 	}
 	return -1;
 }
@@ -499,18 +553,101 @@ static void FormatSubtitleText(char* dest, int destSize, Actor* speaker, const c
 	dest[destSize - 1] = 0;
 }
 
+static bool IsTileVisibleNow(Tile* tile) {
+	if (!tile) return false;
+	TileValue* visible = tile->GetValue(g_traitVisible);
+	return visible && visible->num > 0.5f;
+}
+
 //menu visibility array - index by menu type ID
 static UInt8* g_menuVisibility = (UInt8*)0x11F308F;
 static constexpr UInt32 kMenuType_Dialogue = 1009;
+static constexpr int MAX_RECENT_DIALOGUE_TOPICS = 16;
+
+struct RecentDialogueTopic {
+	TESTopicInfo* topicInfo;
+	DWORD seenAt;
+};
+
+static RecentDialogueTopic g_recentDialogueTopics[MAX_RECENT_DIALOGUE_TOPICS] = {};
+static int g_recentDialogueTopicWrite = 0;
+static DWORD g_lastDialogueMenuOpenTick = 0;
+static bool g_prevDialogueMenuOpen = false;
 
 static bool IsDialogueMenuOpen() {
 	return g_menuVisibility[kMenuType_Dialogue] != 0;
 }
 
+static DWORD GetDialogueTailMs() {
+	if (Config::fMenuDialogueTailSeconds <= 0.0f) return 0;
+	return (DWORD)(Config::fMenuDialogueTailSeconds * 1000.0f);
+}
+
+static void ClearRecentDialogueTopics() {
+	for (int i = 0; i < MAX_RECENT_DIALOGUE_TOPICS; i++) {
+		g_recentDialogueTopics[i].topicInfo = nullptr;
+		g_recentDialogueTopics[i].seenAt = 0;
+	}
+	g_recentDialogueTopicWrite = 0;
+}
+
+static void RememberDialogueTopic(TESTopicInfo* topicInfo, DWORD now) {
+	if (!topicInfo) return;
+
+	for (int i = 0; i < MAX_RECENT_DIALOGUE_TOPICS; i++) {
+		if (g_recentDialogueTopics[i].topicInfo == topicInfo) {
+			g_recentDialogueTopics[i].seenAt = now;
+			return;
+		}
+	}
+
+	g_recentDialogueTopics[g_recentDialogueTopicWrite].topicInfo = topicInfo;
+	g_recentDialogueTopics[g_recentDialogueTopicWrite].seenAt = now;
+	g_recentDialogueTopicWrite++;
+	if (g_recentDialogueTopicWrite >= MAX_RECENT_DIALOGUE_TOPICS) g_recentDialogueTopicWrite = 0;
+}
+
+static bool IsRecentDialogueTopic(TESTopicInfo* topicInfo, DWORD now) {
+	if (!topicInfo) return false;
+	DWORD tailMs = GetDialogueTailMs();
+	if (!tailMs) return false;
+
+	for (int i = 0; i < MAX_RECENT_DIALOGUE_TOPICS; i++) {
+		RecentDialogueTopic& recent = g_recentDialogueTopics[i];
+		if (!recent.topicInfo) continue;
+		if ((now - recent.seenAt) > tailMs) {
+			recent.topicInfo = nullptr;
+			continue;
+		}
+		if (recent.topicInfo == topicInfo) return true;
+	}
+	return false;
+}
+
 //callback from itr-nvse - queue speaker pointer for main thread processing
 static void OnDialogueCallback(Actor* speaker, const char* text, float duration, TESTopicInfo* topicInfo, TESTopic* topic) {
-	if (g_isLoading) return;
-	if (!speaker || !text || !text[0]) return;
+	DWORD now = GetTickCount();
+
+	if (g_isLoading) {
+		return;
+	}
+	if (Config::bSuppressMenuDialogueTail) {
+		bool dialogueMenuOpen = IsDialogueMenuOpen();
+		if (dialogueMenuOpen) {
+			g_lastDialogueMenuOpenTick = now;
+			RememberDialogueTopic(topicInfo, now);
+			return;
+		}
+
+		DWORD tailMs = GetDialogueTailMs();
+		if (tailMs && (now - g_lastDialogueMenuOpenTick) <= tailMs && IsRecentDialogueTopic(topicInfo, now)) {
+			return;
+		}
+	}
+
+	if (!speaker || !text || !text[0]) {
+		return;
+	}
 
 	for (int i = 0; i < 16; i++) {
 		if (InterlockedCompareExchange(&g_pending[i].state, 1, 0) == 0) {
@@ -534,20 +671,23 @@ static void ProcessPendingSubtitles() {
 	//skip all pending if dialogue menu opened (catches greeting lines)
 	if (IsDialogueMenuOpen()) {
 		for (int i = 0; i < 16; i++) {
-			if (g_pending[i].state == 2) InterlockedExchange(&g_pending[i].state, 0);
+			if (g_pending[i].state == 2) {
+				InterlockedExchange(&g_pending[i].state, 0);
+			}
 		}
 		return;
 	}
 
-	for (int i = 0; i < 16; i++) {
-		if (InterlockedCompareExchange(&g_pending[i].state, 3, 2) == 2) {
-			Actor* speaker = g_pending[i].speaker;
+		for (int i = 0; i < 16; i++) {
+			if (InterlockedCompareExchange(&g_pending[i].state, 3, 2) == 2) {
+				Actor* speaker = g_pending[i].speaker;
+				UInt32 speakerRefID = speaker ? speaker->refID : 0;
 
-			//validate speaker on main thread
-			if (!speaker || !IsFormValid((TESForm*)speaker)) {
-				InterlockedExchange(&g_pending[i].state, 0);
-				continue;
-			}
+				//validate speaker on main thread
+				if (!speaker || !speakerRefID || !IsFormValid((TESForm*)speaker)) {
+					InterlockedExchange(&g_pending[i].state, 0);
+					continue;
+				}
 
 			float durSec = g_pending[i].duration;
 			if (durSec < 0.5f) durSec = 0.5f;
@@ -576,14 +716,29 @@ static void ProcessPendingSubtitles() {
 			}
 
 			//check if speaker already has subtitle - replace it
-			int existing = FindSubtitleForSpeaker(speaker);
-			if (existing >= 0) {
-				FormatSubtitleText(g_activeSubtitles[existing].text, 512, speaker, text);
-				g_activeSubtitles[existing].timeAdded = now;
-				g_activeSubtitles[existing].duration = durationMs;
-				InterlockedExchange(&g_pending[i].state, 0);
-				continue;
-			}
+				int existing = FindSubtitleForSpeaker(speaker);
+				if (existing >= 0) {
+					ActiveSubtitle& current = g_activeSubtitles[existing];
+					bool wasVisible = current.valid && IsTileVisibleNow(current.tile) && ((now - current.timeAdded) < current.duration);
+					current.actor = speaker;
+					current.actorRefID = speakerRefID;
+					FormatSubtitleText(g_activeSubtitles[existing].text, 512, speaker, text);
+					g_activeSubtitles[existing].timeAdded = now;
+					g_activeSubtitles[existing].duration = durationMs;
+				if (Config::bAnimateInterruptReplace && wasVisible) {
+					current.transitionStart = now;
+					current.transitionDuration = (DWORD)(Config::fInterruptAnimSeconds * 1000.0f);
+					if (current.transitionDuration < 30) current.transitionDuration = 30;
+					current.transitionActive = true;
+					} else {
+						current.transitionActive = false;
+					}
+					current.fadeInActive = false;
+					current.fadeInStart = 0;
+					current.fadeInDuration = 0;
+					InterlockedExchange(&g_pending[i].state, 0);
+					continue;
+				}
 
 			//find empty slot or oldest
 			int slot = -1;
@@ -604,28 +759,45 @@ static void ProcessPendingSubtitles() {
 			if (slot < 0) slot = oldestSlot;
 
 			//create tile if needed
-			if (!g_activeSubtitles[slot].tile) {
-				g_activeSubtitles[slot].tile = CreateSubtitleTile();
+				if (!g_activeSubtitles[slot].tile) {
+					g_activeSubtitles[slot].tile = CreateSubtitleTile();
+				}
+
+				// Reused tiles can still contain the previous speaker text for this frame.
+				// Force hidden before assigning the next subtitle to avoid stale flicker.
+				if (g_activeSubtitles[slot].tile) {
+					g_activeSubtitles[slot].tile->SetFloat(g_traitVisible, 0.0f);
+					g_activeSubtitles[slot].tile->SetFloat(g_traitAlpha, 0.0f);
+				}
+
+				g_activeSubtitles[slot].actor = speaker;
+				g_activeSubtitles[slot].actorRefID = speakerRefID;
+				FormatSubtitleText(g_activeSubtitles[slot].text, 512, speaker, text);
+					g_activeSubtitles[slot].timeAdded = now;
+				g_activeSubtitles[slot].duration = durationMs;
+				g_activeSubtitles[slot].transitionStart = 0;
+				g_activeSubtitles[slot].transitionDuration = 0;
+				g_activeSubtitles[slot].transitionActive = false;
+				if (Config::bFadeInNewSubtitles) {
+					g_activeSubtitles[slot].fadeInStart = now;
+					g_activeSubtitles[slot].fadeInDuration = (DWORD)(Config::fNewSubtitleFadeSeconds * 1000.0f);
+					g_activeSubtitles[slot].fadeInActive = g_activeSubtitles[slot].fadeInDuration > 0;
+				} else {
+					g_activeSubtitles[slot].fadeInStart = 0;
+					g_activeSubtitles[slot].fadeInDuration = 0;
+					g_activeSubtitles[slot].fadeInActive = false;
+				}
+				g_activeSubtitles[slot].valid = true;
+				g_activeSubtitles[slot].isNarrator = narrator;
+
+				InterlockedExchange(&g_pending[i].state, 0);
 			}
-
-			g_activeSubtitles[slot].actor = speaker;
-			FormatSubtitleText(g_activeSubtitles[slot].text, 512, speaker, text);
-			g_activeSubtitles[slot].timeAdded = now;
-			g_activeSubtitles[slot].duration = durationMs;
-			g_activeSubtitles[slot].valid = true;
-			g_activeSubtitles[slot].isNarrator = narrator;
-
-			InterlockedExchange(&g_pending[i].state, 0);
 		}
-	}
 }
 
 static void ResetState(bool hideTiles = true) {
 	if (hideTiles) {
 		HideAllSubtitles();
-		if (g_fsRootTile && g_traitStdVisible) {
-			g_fsRootTile->SetFloat(g_traitStdVisible, 0.0f);
-		}
 	}
 
 	g_initialized = false;
@@ -635,6 +807,9 @@ static void ResetState(bool hideTiles = true) {
 	g_lastPlayerCell = nullptr;
 	g_narratorPending = false;
 	g_narratorSpeaker = nullptr;
+	g_lastDialogueMenuOpenTick = 0;
+	g_prevDialogueMenuOpen = false;
+	ClearRecentDialogueTopics();
 	for (int i = 0; i < 16; i++) {
 		InterlockedExchange(&g_pending[i].state, 0);
 	}
@@ -642,6 +817,13 @@ static void ResetState(bool hideTiles = true) {
 		g_activeSubtitles[i].tile = nullptr;
 		g_activeSubtitles[i].valid = false;
 		g_activeSubtitles[i].actor = nullptr;
+		g_activeSubtitles[i].actorRefID = 0;
+		g_activeSubtitles[i].transitionStart = 0;
+		g_activeSubtitles[i].transitionDuration = 0;
+		g_activeSubtitles[i].transitionActive = false;
+		g_activeSubtitles[i].fadeInStart = 0;
+		g_activeSubtitles[i].fadeInDuration = 0;
+		g_activeSubtitles[i].fadeInActive = false;
 		g_activeSubtitles[i].isNarrator = false;
 	}
 }
@@ -679,6 +861,11 @@ static void InitFloatingSubtitles() {
 
 	InitTraits();
 
+	// Root can survive save/load transitions; ensure it is re-enabled on re-init.
+	if (g_traitStdVisible) {
+		g_fsRootTile->SetFloat(g_traitStdVisible, 1.0f);
+	}
+
 	g_fsOffScreenTile = GetTileChild(g_fsRootTile, "FSOffScreen");
 	if (g_fsOffScreenTile) {
 		g_fsOffScreenTile->SetFloat(g_traitOffY, Config::fOffScreenY);
@@ -703,35 +890,121 @@ static float CalcFadeAlpha(float dist) {
 	return 255.0f * (1.0f - fadePct);
 }
 
+struct ScreenPlacement {
+	int slot;
+	float baseX;
+	float x;
+	float y;
+	float alpha;
+	UInt32 actorRefID;
+};
+
+static float ClampFloat(float v, float lo, float hi) {
+	if (v < lo) return lo;
+	if (v > hi) return hi;
+	return v;
+}
+
+static bool BoxesOverlap(const ScreenPlacement& a, const ScreenPlacement& b, float halfW, float halfH) {
+	return fabsf(a.x - b.x) < (halfW * 2.0f) && fabsf(a.y - b.y) < (halfH * 2.0f);
+}
+
+static void ResolveSubtitleOverlaps(ScreenPlacement* placements, int count) {
+	if (!Config::bResolveSubtitleOverlap || !placements || count < 2) return;
+
+	const float halfW = Config::fOverlapBoxWidthNorm * 0.5f;
+	const float halfH = Config::fOverlapBoxHeightNorm * 0.5f;
+	const float desiredCenterDelta = Config::fOverlapBoxWidthNorm + Config::fOverlapPaddingNorm;
+	const float maxShift = Config::fOverlapMaxShiftNorm;
+	if (desiredCenterDelta <= 0.0f || halfW <= 0.0f || halfH <= 0.0f) return;
+
+	for (int pass = 0; pass < 4; pass++) {
+		bool any = false;
+
+		for (int i = 0; i < count; i++) {
+			for (int j = i + 1; j < count; j++) {
+				if (!BoxesOverlap(placements[i], placements[j], halfW, halfH)) continue;
+				any = true;
+
+				// Stable side assignment to avoid jitter when actors are in-line.
+				bool iLeft = true;
+				float baseDX = placements[i].baseX - placements[j].baseX;
+				if (fabsf(baseDX) > 0.003f) {
+					iLeft = baseDX < 0.0f;
+				} else {
+					iLeft = placements[i].actorRefID <= placements[j].actorRefID;
+				}
+
+				int leftIdx = iLeft ? i : j;
+				int rightIdx = iLeft ? j : i;
+				ScreenPlacement& left = placements[leftIdx];
+				ScreenPlacement& right = placements[rightIdx];
+
+				float center = (left.x + right.x) * 0.5f;
+				float leftTarget = center - (desiredCenterDelta * 0.5f);
+				float rightTarget = center + (desiredCenterDelta * 0.5f);
+
+				float leftMin = left.baseX - maxShift;
+				float leftMax = left.baseX + maxShift;
+				float rightMin = right.baseX - maxShift;
+				float rightMax = right.baseX + maxShift;
+
+				left.x = ClampFloat(leftTarget, leftMin, leftMax);
+				right.x = ClampFloat(rightTarget, rightMin, rightMax);
+
+				left.x = ClampFloat(left.x, halfW, 1.0f - halfW);
+				right.x = ClampFloat(right.x, halfW, 1.0f - halfW);
+			}
+		}
+
+		if (!any) break;
+	}
+}
+
 static void UpdateSubtitlePositions() {
 	if (!g_initialized || !g_fsRootTile || g_disabled) return;
 	if (!g_JG_WorldToScreen && !InitWorldToScreen()) return;
 
 	PlayerCharacter* player = *g_thePlayer;
 	if (!player) return;
+	DWORD now = GetTickCount();
 
 	//track closest off-screen speaker
 	int offScreenIdx = -1;
 	float offScreenDist = 999999.0f;
+	ScreenPlacement placements[MAX_SUBTITLES];
+	int placementCount = 0;
 
 	for (int i = 0; i < MAX_SUBTITLES; i++) {
 		ActiveSubtitle& sub = g_activeSubtitles[i];
 		if (!sub.tile) continue;
 
-		if (!sub.valid || !sub.actor) {
-			sub.tile->SetFloat(g_traitX, -1.0f);
-			sub.tile->SetFloat(g_traitY, -1.0f);
-			sub.tile->SetFloat(g_traitVisible, 0.0f);
-			continue;
-		}
+			if (!sub.valid || !sub.actor) {
+				sub.tile->SetFloat(g_traitX, -1.0f);
+				sub.tile->SetFloat(g_traitY, -1.0f);
+				sub.tile->SetFloat(g_traitVisible, 0.0f);
+				continue;
+			}
 
-		//check actor still valid
-		if (!IsFormValid((TESForm*)sub.actor)) {
-			sub.valid = false;
-			sub.actor = nullptr;
-			sub.tile->SetFloat(g_traitVisible, 0.0f);
-			continue;
-		}
+			//check actor still valid
+			if (!IsFormValid((TESForm*)sub.actor)) {
+				sub.valid = false;
+				sub.actor = nullptr;
+				sub.actorRefID = 0;
+				sub.transitionActive = false;
+				sub.fadeInActive = false;
+				sub.tile->SetFloat(g_traitVisible, 0.0f);
+				continue;
+			}
+			if (sub.actorRefID && sub.actor->refID != sub.actorRefID) {
+				sub.valid = false;
+				sub.actor = nullptr;
+				sub.actorRefID = 0;
+				sub.transitionActive = false;
+				sub.fadeInActive = false;
+				sub.tile->SetFloat(g_traitVisible, 0.0f);
+				continue;
+			}
 
 		//narrators always go to off-screen display, skip distance/LOS
 		if (sub.isNarrator) {
@@ -799,11 +1072,48 @@ static void UpdateSubtitlePositions() {
 		}
 
 		float alpha = CalcFadeAlpha(dist);
-		sub.tile->SetFloat(g_traitX, screenPos.x);
-		sub.tile->SetFloat(g_traitY, screenPos.y);
-		sub.tile->SetFloat(g_traitAlpha, alpha);
-		sub.tile->SetFloat(g_traitVisible, 1.0f);
+			if (sub.transitionActive) {
+				DWORD elapsed = now - sub.transitionStart;
+				if (elapsed >= sub.transitionDuration || sub.transitionDuration == 0) {
+					sub.transitionActive = false;
+				} else {
+					float t = (float)elapsed / (float)sub.transitionDuration;
+					alpha *= Config::fInterruptFadeFloor + (1.0f - Config::fInterruptFadeFloor) * t;
+					screenPos.y -= Config::fInterruptSlideNorm * (1.0f - t);
+				}
+			}
+			if (sub.fadeInActive) {
+				DWORD elapsed = now - sub.fadeInStart;
+				if (elapsed >= sub.fadeInDuration || sub.fadeInDuration == 0) {
+					sub.fadeInActive = false;
+				} else {
+					float t = (float)elapsed / (float)sub.fadeInDuration;
+					alpha *= t;
+				}
+			}
+			if (placementCount < MAX_SUBTITLES) {
+				ScreenPlacement& placement = placements[placementCount++];
+			placement.slot = i;
+			placement.baseX = screenPos.x;
+			placement.x = screenPos.x;
+			placement.y = screenPos.y;
+			placement.alpha = alpha;
+			placement.actorRefID = sub.actor ? sub.actor->refID : 0;
+		}
+	}
+
+	ResolveSubtitleOverlaps(placements, placementCount);
+
+	for (int i = 0; i < placementCount; i++) {
+		const ScreenPlacement& placement = placements[i];
+		ActiveSubtitle& sub = g_activeSubtitles[placement.slot];
+		if (!sub.tile) continue;
+
 		sub.tile->SetString(g_traitText, sub.text);
+		sub.tile->SetFloat(g_traitX, placement.x);
+		sub.tile->SetFloat(g_traitY, placement.y);
+		sub.tile->SetFloat(g_traitAlpha, placement.alpha);
+		sub.tile->SetFloat(g_traitVisible, 1.0f);
 	}
 
 	//show closest off-screen speaker in bottom tile
@@ -823,6 +1133,13 @@ static void HideAllSubtitles() {
 	for (int i = 0; i < MAX_SUBTITLES; i++) {
 		g_activeSubtitles[i].valid = false;
 		g_activeSubtitles[i].actor = nullptr;
+		g_activeSubtitles[i].actorRefID = 0;
+		g_activeSubtitles[i].transitionActive = false;
+		g_activeSubtitles[i].transitionStart = 0;
+		g_activeSubtitles[i].transitionDuration = 0;
+		g_activeSubtitles[i].fadeInActive = false;
+		g_activeSubtitles[i].fadeInStart = 0;
+		g_activeSubtitles[i].fadeInDuration = 0;
 		if (g_activeSubtitles[i].tile) {
 			g_activeSubtitles[i].tile->SetFloat(g_traitVisible, 0.0f);
 		}
@@ -868,6 +1185,22 @@ static void OnHUDUpdate() {
 		return;
 	}
 
+	bool dialogueMenuOpen = IsDialogueMenuOpen();
+	if (Config::bSuppressMenuDialogueTail) {
+		DWORD now = GetTickCount();
+		if (dialogueMenuOpen) {
+			g_lastDialogueMenuOpenTick = now;
+		} else if (g_prevDialogueMenuOpen) {
+			//drop leftovers queued right as dialogue menu closes
+			for (int i = 0; i < 16; i++) {
+				if (g_pending[i].state == 2) {
+					InterlockedExchange(&g_pending[i].state, 0);
+				}
+			}
+		}
+	}
+	g_prevDialogueMenuOpen = dialogueMenuOpen;
+
 	//clear subtitles on cell change
 	void* currentCell = GetParentCell((TESObjectREFR*)player);
 	if (currentCell != g_lastPlayerCell) {
@@ -876,7 +1209,7 @@ static void OnHUDUpdate() {
 	}
 
 	//hide floating subtitles during dialogue menu
-	if (IsDialogueMenuOpen()) {
+	if (dialogueMenuOpen) {
 		HideAllSubtitles();
 		return;
 	}
@@ -886,13 +1219,20 @@ static void OnHUDUpdate() {
 
 	//expire subtitles based on their duration
 	DWORD now = GetTickCount();
-	for (int i = 0; i < MAX_SUBTITLES; i++) {
-		if (g_activeSubtitles[i].valid && (now - g_activeSubtitles[i].timeAdded) > g_activeSubtitles[i].duration) {
-			g_activeSubtitles[i].valid = false;
-			g_activeSubtitles[i].actor = nullptr;
-			if (g_activeSubtitles[i].tile) {
-				g_activeSubtitles[i].tile->SetFloat(g_traitVisible, 0.0f);
-			}
+		for (int i = 0; i < MAX_SUBTITLES; i++) {
+			if (g_activeSubtitles[i].valid && (now - g_activeSubtitles[i].timeAdded) > g_activeSubtitles[i].duration) {
+				g_activeSubtitles[i].valid = false;
+				g_activeSubtitles[i].actor = nullptr;
+				g_activeSubtitles[i].actorRefID = 0;
+				g_activeSubtitles[i].transitionActive = false;
+				g_activeSubtitles[i].transitionStart = 0;
+				g_activeSubtitles[i].transitionDuration = 0;
+				g_activeSubtitles[i].fadeInActive = false;
+				g_activeSubtitles[i].fadeInStart = 0;
+				g_activeSubtitles[i].fadeInDuration = 0;
+				if (g_activeSubtitles[i].tile) {
+					g_activeSubtitles[i].tile->SetFloat(g_traitVisible, 0.0f);
+				}
 		}
 	}
 }
@@ -918,21 +1258,23 @@ static void InstallHUDHook() {
 static void __cdecl OnVanillaSubtitle(const char* text, TESObjectREFR* speaker) {
 	if (g_isLoading) return;
 	if (!text || !text[0]) return;
-	if (!g_narratorPending) return;
+	if (!g_narratorPending) {
+		return;
+	}
 	if (IsEmptyOrWhitespace(text)) return;
 
 	for (int i = 0; i < 16; i++) {
 		if (InterlockedCompareExchange(&g_pending[i].state, 1, 0) == 0) {
 			g_pending[i].speaker = g_narratorSpeaker;
 			strncpy(g_pending[i].text, text, 511);
-			g_pending[i].text[511] = 0;
-			g_pending[i].duration = g_narratorDuration;
-			g_pending[i].isNarrator = true;
-			InterlockedExchange(&g_pending[i].state, 2);
-			g_narratorPending = false;
-			return;
+				g_pending[i].text[511] = 0;
+				g_pending[i].duration = g_narratorDuration;
+				g_pending[i].isNarrator = true;
+				InterlockedExchange(&g_pending[i].state, 2);
+				g_narratorPending = false;
+				return;
+			}
 		}
-	}
 }
 
 static __declspec(naked) void AppendSubtitleHook() {
@@ -985,7 +1327,6 @@ static bool InitITRCallback() {
 static void OnMainGameLoop() {
 	if (g_disabled) return;
 
-	//try to register callback if not done yet
 	if (!g_callbackRegistered) {
 		InitITRCallback();
 	}
@@ -1012,15 +1353,21 @@ static void MessageHandler(NVSEMessage* msg) {
 			break;
 		case kMessage_PreLoadGame:
 			g_isLoading = true;
+			g_callbackRegistered = false;
+			g_registerCallback = nullptr;
 			ResetState(true);
 			g_disabled = false;
 			break;
 		case kMessage_ExitToMainMenu:
 			g_isLoading = true;
+			g_callbackRegistered = false;
+			g_registerCallback = nullptr;
 			ResetState(true);
 			g_disabled = false;
 			break;
 		case kMessage_PostLoadGame:
+			g_callbackRegistered = false;
+			g_registerCallback = nullptr;
 			ResetState(true);
 			g_disabled = false;
 			g_isLoading = false;
@@ -1029,7 +1376,20 @@ static void MessageHandler(NVSEMessage* msg) {
 			g_isLoading = false;
 			break;
 		case kMessage_ReloadConfig:
+			// ReloadPluginConfig dispatches with target plugin name in msg->data.
+			// Ignore reload requests for other plugins to avoid unnecessary churn.
+			if (msg->data && msg->dataLen > 0) {
+				const char* pluginName = (const char*)msg->data;
+				if (_stricmp(pluginName, PLUGIN_NAME) != 0) {
+					break;
+				}
+			}
 			Config::Load(g_iniPath);
+			if (!Config::bSuppressMenuDialogueTail) {
+				g_lastDialogueMenuOpenTick = 0;
+				g_prevDialogueMenuOpen = false;
+				ClearRecentDialogueTopics();
+			}
 			ApplyFontSettings();
 			break;
 	}
