@@ -118,7 +118,6 @@ struct NVSEMessage {
 	void* data;
 };
 
-// Keep in sync with NVSEMessagingInterface message IDs (xNVSE kVersion=4).
 enum { kMessage_PostLoad = 0, kMessage_ExitToMainMenu = 2, kMessage_PreLoadGame = 6, kMessage_PostLoadGame = 8, kMessage_PostPostLoad = 9, kMessage_NewGame = 14, kMessage_MainGameLoop = 20, kMessage_ReloadConfig = 25 };
 enum { kInterface_Messaging = 2 };
 
@@ -156,8 +155,8 @@ static const char* GetActorName(Actor* actor) {
 	if (!actor) return nullptr;
 	TESForm* baseForm = *(TESForm**)((UInt8*)actor + 0x20);
 	if (!baseForm) return nullptr;
-	//NPC_ (42) and Creature (43) have TESFullName at offset 0xD0 (0x34 * 4)
-	//string pointer at +4, length at +8
+	//only NPC_ (42) and Creature (43) have TESFullName at this offset
+	if (baseForm->typeID != 42 && baseForm->typeID != 43) return nullptr;
 	char** namePtr = (char**)((UInt8*)baseForm + 0xD0 + 4);
 	UInt16* lenPtr = (UInt16*)((UInt8*)baseForm + 0xD0 + 8);
 	if (*namePtr && *lenPtr > 0) {
@@ -171,19 +170,50 @@ static const char* GetFormEditorID(TESForm* form) {
 	if (!form) return nullptr;
 	//vtable index 0x4C (offset 0x130) = GetEditorID
 	void** vtable = *(void***)form;
-	if (!vtable) return nullptr;
 	return ((const char*(__thiscall*)(void*))vtable[0x4C])(form);
 }
+
+static bool StringContainsNoCase(const char* text, const char* token) {
+	if (!text || !token || !token[0]) return false;
+	size_t tokenLen = strlen(token);
+	for (const char* p = text; *p; p++) {
+		if (_strnicmp(p, token, tokenLen) == 0) return true;
+	}
+	return false;
+}
+
+static bool NameMatchesBobFromAccounting(const char* name) {
+	if (!name || !name[0]) return false;
+	// Be tolerant of small formatting differences (prefix/suffix/spacing).
+	if (StringContainsNoCase(name, "bob from accounting")) return true;
+	if (StringContainsNoCase(name, "bob  from accounting")) return true;
+	if (StringContainsNoCase(name, "bob-from-accounting")) return true;
+	return false;
+}
+
+typedef TESForm* (__cdecl* LookupByEditorID_t)(const char* editorID);
+static LookupByEditorID_t g_lookupByEditorID = (LookupByEditorID_t)0x483A00;
+static TESForm* g_cachedDLC02NarratorBase = nullptr;
 
 static bool IsNarratorActor(Actor* actor) {
 	if (!actor) return false;
 	TESForm* baseForm = *(TESForm**)((UInt8*)actor + 0x20);
 	if (!baseForm) return false;
-	const char* edid = GetFormEditorID(baseForm);
-	if (!edid || !edid[0]) return false;
-	for (const char* p = edid; *p; p++) {
-		if (_strnicmp(p, "narrator", 8) == 0) return true;
+	if (!g_cachedDLC02NarratorBase && g_lookupByEditorID) {
+		g_cachedDLC02NarratorBase = g_lookupByEditorID("NVDLC02Narrator");
 	}
+	if (g_cachedDLC02NarratorBase) {
+		if (baseForm == g_cachedDLC02NarratorBase) return true;
+		if ((TESForm*)actor == g_cachedDLC02NarratorBase) return true;
+		if (baseForm->refID == g_cachedDLC02NarratorBase->refID) return true;
+	}
+	const char* edid = GetFormEditorID(baseForm);
+	if (StringContainsNoCase(edid, "narrator")) return true;
+	if (StringContainsNoCase(edid, "bobfromaccounting")) return true;
+	if (StringContainsNoCase(edid, "bob_from_accounting")) return true;
+	const char* name = GetActorName(actor);
+	if (StringContainsNoCase(name, "narrator")) return true;
+	if (NameMatchesBobFromAccounting(name)) return true;
 	return false;
 }
 
@@ -230,10 +260,25 @@ static FILE* g_logFile = nullptr;
 static DTF_RegisterNativeCallback_t g_registerCallback = nullptr;
 static bool g_callbackRegistered = false;
 static char g_iniPath[MAX_PATH] = {};
-static volatile bool g_narratorPending = false;
+static volatile long g_narratorPending = 0;
 static Actor* g_narratorSpeaker = nullptr;
 static float g_narratorDuration = 5.0f;
-static volatile bool g_isLoading = false;
+static volatile long g_isLoading = 0;
+static bool g_applyVisualSettingsPending = false;
+static float g_runtimeFloatingWrapWidth = 400.0f;
+static float g_runtimeCenterWrapWidth = 700.0f;
+
+static bool IsLoadingState() { return g_isLoading != 0; }
+
+static void SetLoadingState(bool loading) {
+	InterlockedExchange(&g_isLoading, loading ? 1 : 0);
+}
+
+static bool IsNarratorPendingState() { return g_narratorPending != 0; }
+
+static void SetNarratorPendingState(bool pending) {
+	InterlockedExchange(&g_narratorPending, pending ? 1 : 0);
+}
 
 static void Log(const char* fmt, ...) {
 	if (!g_logFile) return;
@@ -292,10 +337,17 @@ static Tile* ReadXML(Tile* parentTile, const char* path) {
 
 static bool IsFormValid(TESForm* form) {
 	if (!form) return false;
-	if (form->refID == 0) return false;
-	if (form->flags & 0x20) return false;
-	if (form->flags & 0x800) return false;
+	if (!form->refID) return false;
+	if (form->flags & (0x20 | 0x800)) return false;
 	return true;
+}
+
+static bool IsPlayerSpeaker(Actor* speaker, UInt32 knownSpeakerRefID = 0) {
+	if (!speaker) return false;
+	UInt32 refID = knownSpeakerRefID ? knownSpeakerRefID : speaker->refID;
+	if (refID == 0x14) return true;
+	PlayerCharacter* player = *g_thePlayer;
+	return player && (Actor*)player == speaker;
 }
 
 static NiNode* GetRefNiNode(TESObjectREFR* ref) {
@@ -323,14 +375,11 @@ static NiAVObject* GetBlockByNameInternal(NiNode* node, const char* namePtr) {
 		NiAVObject* child = children[i];
 		if (!child) continue;
 
-		//validate child pointer range before dereferencing
-		if ((UInt32)child < 0x10000 || (UInt32)child > 0x7FFFFFFF) continue;
-
 		const char* childName = *(const char**)((UInt8*)child + 0x8);
 		if (childName == namePtr) return child;
 
 		void** vtable = *(void***)child;
-		if (!vtable || (UInt32)vtable < 0x10000 || (UInt32)vtable > 0x7FFFFFFF) continue;
+		if (!vtable) continue;
 
 		typedef void* (__thiscall *IsNodeFn)(void*);
 		if (((IsNodeFn)vtable[0xC / 4])(child)) {
@@ -343,15 +392,10 @@ static NiAVObject* GetBlockByNameInternal(NiNode* node, const char* namePtr) {
 
 static NiAVObject* GetBlockByName(NiNode* node, const char* name) {
 	if (!node || !name || !name[0]) return nullptr;
-	__try {
-		const char* namePtr = GetNiFixedString(name);
-		if (!namePtr) return nullptr;
-		InterlockedDecrement((volatile long*)(namePtr - 8));
-		if (*(long*)(namePtr - 8) <= 0) return nullptr;
-		return GetBlockByNameInternal(node, namePtr);
-	} __except(EXCEPTION_EXECUTE_HANDLER) {
-		return nullptr;
-	}
+	const char* namePtr = GetNiFixedString(name);
+	if (!namePtr) return nullptr;
+	InterlockedDecrement((volatile long*)(namePtr - 8)); //balance AddString refcount
+	return GetBlockByNameInternal(node, namePtr);
 }
 
 namespace Config {
@@ -363,6 +407,8 @@ namespace Config {
 	float fFontSize = 100.0f;
 	bool bShowSpeakerName = true;
 	float fOffScreenY = 0.85f;
+	float fFloatingWrapWidth = 400.0f;
+	float fCenterWrapWidth = 700.0f;
 	bool bRequireLOS = false;
 	float fSubtitleScale = 1.0f;
 	bool bSuppressMenuDialogueTail = true;
@@ -399,6 +445,12 @@ namespace Config {
 		fFontSize = GetFloat("Settings", "fFontSize", fFontSize, path);
 		bShowSpeakerName = GetInt("Settings", "bShowSpeakerName", bShowSpeakerName ? 1 : 0, path) != 0;
 		fOffScreenY = GetFloat("Settings", "fOffScreenY", fOffScreenY, path);
+		fFloatingWrapWidth = GetFloat("Settings", "fFloatingWrapWidth", fFloatingWrapWidth, path);
+		fCenterWrapWidth = GetFloat("Settings", "fCenterWrapWidth", fCenterWrapWidth, path);
+		if (fFloatingWrapWidth < 120.0f) fFloatingWrapWidth = 120.0f;
+		if (fFloatingWrapWidth > 1800.0f) fFloatingWrapWidth = 1800.0f;
+		if (fCenterWrapWidth < 120.0f) fCenterWrapWidth = 120.0f;
+		if (fCenterWrapWidth > 2400.0f) fCenterWrapWidth = 2400.0f;
 		bRequireLOS = GetInt("Settings", "bRequireLOS", bRequireLOS ? 1 : 0, path) != 0;
 		fSubtitleScale = GetFloat("Settings", "fSubtitleScale", fSubtitleScale, path);
 		bSuppressMenuDialogueTail = GetInt("Settings", "bSuppressMenuDialogueTail", bSuppressMenuDialogueTail ? 1 : 0, path) != 0;
@@ -482,6 +534,8 @@ static UInt32 g_traitFont = 0;
 static UInt32 g_traitZoom = 0;
 static UInt32 g_traitStdY = 0;
 static UInt32 g_traitOffY = 0;
+static UInt32 g_traitFSWrapWidth = 0;
+static UInt32 g_traitFSOffWrapWidth = 0;
 
 static void InitTraits() {
 	static bool done = false;
@@ -501,6 +555,8 @@ static void InitTraits() {
 	g_traitZoom = GetTraitID("zoom");
 	g_traitStdY = GetTraitID("y");
 	g_traitOffY = GetTraitID("_FSOffY");
+	g_traitFSWrapWidth = GetTraitID("_FSWrapWidth");
+	g_traitFSOffWrapWidth = GetTraitID("_FSOffWrapWidth");
 	done = true;
 }
 
@@ -524,6 +580,15 @@ struct PendingSubtitle {
 	volatile long state; //0=free, 1=writing, 2=ready
 };
 static PendingSubtitle g_pending[16] = {};
+
+static void ClearPendingSubtitleQueue() {
+	for (int i = 0; i < 16; i++) {
+		InterlockedExchange(&g_pending[i].state, 0);
+	}
+	SetNarratorPendingState(false);
+	g_narratorSpeaker = nullptr;
+	g_narratorDuration = 5.0f;
+}
 
 //strip {voice directions} from subtitle text
 static void StripCurlyBraces(char* text) {
@@ -628,7 +693,7 @@ static bool IsRecentDialogueTopic(TESTopicInfo* topicInfo, DWORD now) {
 static void OnDialogueCallback(Actor* speaker, const char* text, float duration, TESTopicInfo* topicInfo, TESTopic* topic) {
 	DWORD now = GetTickCount();
 
-	if (g_isLoading) {
+	if (IsLoadingState()) {
 		return;
 	}
 	if (Config::bSuppressMenuDialogueTail) {
@@ -681,10 +746,12 @@ static void ProcessPendingSubtitles() {
 		for (int i = 0; i < 16; i++) {
 			if (InterlockedCompareExchange(&g_pending[i].state, 3, 2) == 2) {
 				Actor* speaker = g_pending[i].speaker;
-				UInt32 speakerRefID = speaker ? speaker->refID : 0;
-
-				//validate speaker on main thread
-				if (!speaker || !speakerRefID || !IsFormValid((TESForm*)speaker)) {
+				if (!speaker || !IsFormValid((TESForm*)speaker)) {
+					InterlockedExchange(&g_pending[i].state, 0);
+					continue;
+				}
+				UInt32 speakerRefID = speaker->refID;
+				if (IsPlayerSpeaker(speaker, speakerRefID)) {
 					InterlockedExchange(&g_pending[i].state, 0);
 					continue;
 				}
@@ -703,26 +770,35 @@ static void ProcessPendingSubtitles() {
 				continue;
 			}
 
-			const char* text = g_pending[i].text;
+				const char* text = g_pending[i].text;
 
-			//check narrator on main thread
-			bool narrator = g_pending[i].isNarrator;
-			if (!narrator && IsNarratorActor(speaker)) {
-				g_narratorSpeaker = speaker;
-				g_narratorDuration = durSec;
-				g_narratorPending = true;
-				InterlockedExchange(&g_pending[i].state, 0);
-				continue;
-			}
+					//check narrator on main thread
+					bool narrator = g_pending[i].isNarrator;
+					bool narratorDetected = false;
+					if (!narrator) {
+						narratorDetected = IsNarratorActor(speaker);
+					}
+					if (!narrator && narratorDetected) {
+						g_narratorSpeaker = speaker;
+						g_narratorDuration = durSec;
+						SetNarratorPendingState(true);
+						InterlockedExchange(&g_pending[i].state, 0);
+						continue;
+					}
 
-			//check if speaker already has subtitle - replace it
+				//check if speaker already has subtitle - replace it
 				int existing = FindSubtitleForSpeaker(speaker);
 				if (existing >= 0) {
 					ActiveSubtitle& current = g_activeSubtitles[existing];
 					bool wasVisible = current.valid && IsTileVisibleNow(current.tile) && ((now - current.timeAdded) < current.duration);
 					current.actor = speaker;
 					current.actorRefID = speakerRefID;
-					FormatSubtitleText(g_activeSubtitles[existing].text, 512, speaker, text);
+					if (narrator) {
+						strncpy(g_activeSubtitles[existing].text, text, 511);
+						g_activeSubtitles[existing].text[511] = 0;
+					} else {
+						FormatSubtitleText(g_activeSubtitles[existing].text, 512, speaker, text);
+					}
 					g_activeSubtitles[existing].timeAdded = now;
 					g_activeSubtitles[existing].duration = durationMs;
 				if (Config::bAnimateInterruptReplace && wasVisible) {
@@ -770,9 +846,14 @@ static void ProcessPendingSubtitles() {
 					g_activeSubtitles[slot].tile->SetFloat(g_traitAlpha, 0.0f);
 				}
 
-				g_activeSubtitles[slot].actor = speaker;
-				g_activeSubtitles[slot].actorRefID = speakerRefID;
-				FormatSubtitleText(g_activeSubtitles[slot].text, 512, speaker, text);
+					g_activeSubtitles[slot].actor = speaker;
+					g_activeSubtitles[slot].actorRefID = speakerRefID;
+					if (narrator) {
+						strncpy(g_activeSubtitles[slot].text, text, 511);
+						g_activeSubtitles[slot].text[511] = 0;
+					} else {
+						FormatSubtitleText(g_activeSubtitles[slot].text, 512, speaker, text);
+					}
 					g_activeSubtitles[slot].timeAdded = now;
 				g_activeSubtitles[slot].duration = durationMs;
 				g_activeSubtitles[slot].transitionStart = 0;
@@ -805,14 +886,10 @@ static void ResetState(bool hideTiles = true) {
 	g_fsOffScreenTile = nullptr;
 	g_fsOffScreenText = nullptr;
 	g_lastPlayerCell = nullptr;
-	g_narratorPending = false;
-	g_narratorSpeaker = nullptr;
 	g_lastDialogueMenuOpenTick = 0;
 	g_prevDialogueMenuOpen = false;
 	ClearRecentDialogueTopics();
-	for (int i = 0; i < 16; i++) {
-		InterlockedExchange(&g_pending[i].state, 0);
-	}
+	ClearPendingSubtitleQueue();
 	for (int i = 0; i < MAX_SUBTITLES; i++) {
 		g_activeSubtitles[i].tile = nullptr;
 		g_activeSubtitles[i].valid = false;
@@ -833,6 +910,9 @@ static Tile* CreateSubtitleTile() {
 	if (!hud || !g_fsRootTile) return nullptr;
 	Tile* tile = hud->AddTileFromTemplate(g_fsRootTile, "FSSubtitle");
 	if (tile) {
+		if (g_traitFSWrapWidth) {
+			tile->SetFloat(g_traitFSWrapWidth, g_runtimeFloatingWrapWidth);
+		}
 		Tile* textTile = GetTileChild(tile, "FSText");
 		if (textTile) {
 			textTile->SetFloat(g_traitFont, (float)Config::iFont);
@@ -869,6 +949,9 @@ static void InitFloatingSubtitles() {
 	g_fsOffScreenTile = GetTileChild(g_fsRootTile, "FSOffScreen");
 	if (g_fsOffScreenTile) {
 		g_fsOffScreenTile->SetFloat(g_traitOffY, Config::fOffScreenY);
+		if (g_traitFSOffWrapWidth) {
+			g_fsOffScreenTile->SetFloat(g_traitFSOffWrapWidth, g_runtimeCenterWrapWidth);
+		}
 		g_fsOffScreenText = GetTileChild(g_fsOffScreenTile, "FSOffText");
 		if (g_fsOffScreenText) {
 			g_fsOffScreenText->SetFloat(g_traitFont, (float)Config::iFont);
@@ -1152,16 +1235,19 @@ static void HideAllSubtitles() {
 static void ApplyFontSettings() {
 	float effectiveZoom = Config::fFontSize * Config::fSubtitleScale;
 	for (int i = 0; i < MAX_SUBTITLES; i++) {
-		if (g_activeSubtitles[i].tile) {
-			Tile* textTile = GetTileChild(g_activeSubtitles[i].tile, "FSText");
-			if (textTile) {
-				textTile->SetFloat(g_traitFont, (float)Config::iFont);
-				textTile->SetFloat(g_traitZoom, effectiveZoom);
-			}
+		if (!g_activeSubtitles[i].tile) continue;
+		if (g_traitFSWrapWidth)
+			g_activeSubtitles[i].tile->SetFloat(g_traitFSWrapWidth, g_runtimeFloatingWrapWidth);
+		Tile* textTile = GetTileChild(g_activeSubtitles[i].tile, "FSText");
+		if (textTile) {
+			textTile->SetFloat(g_traitFont, (float)Config::iFont);
+			textTile->SetFloat(g_traitZoom, effectiveZoom);
 		}
 	}
 	if (g_fsOffScreenTile) {
 		g_fsOffScreenTile->SetFloat(g_traitOffY, Config::fOffScreenY);
+		if (g_traitFSOffWrapWidth)
+			g_fsOffScreenTile->SetFloat(g_traitFSOffWrapWidth, g_runtimeCenterWrapWidth);
 	}
 	if (g_fsOffScreenText) {
 		g_fsOffScreenText->SetFloat(g_traitFont, (float)Config::iFont);
@@ -1181,8 +1267,14 @@ static void OnHUDUpdate() {
 	PlayerCharacter* player = *g_thePlayer;
 	if (!player || !GetRefNiNode((TESObjectREFR*)player)) {
 		HideAllSubtitles();
+		ClearPendingSubtitleQueue();
 		g_lastPlayerCell = nullptr;
 		return;
+	}
+
+	if (g_applyVisualSettingsPending) {
+		ApplyFontSettings();
+		g_applyVisualSettingsPending = false;
 	}
 
 	bool dialogueMenuOpen = IsDialogueMenuOpen();
@@ -1246,8 +1338,7 @@ static void __fastcall HUDUpdateHook(void* hud, void* edx) {
 }
 
 static void InstallHUDHook() {
-	constexpr UInt32 kVtbl_HUDMainMenu = 0x1072DF4;
-	UInt32 vtblAddr = kVtbl_HUDMainMenu + 11 * 4;
+	UInt32 vtblAddr = 0x1072DF4 + 11 * 4;
 	g_originalHUDUpdate = *(HUDUpdate_t*)vtblAddr;
 	SafeWrite32(vtblAddr, (UInt32)HUDUpdateHook);
 	Log("HUD update hook installed");
@@ -1256,9 +1347,9 @@ static void InstallHUDHook() {
 //intercept AppendSubtitleData: capture narrator text for off-screen display, suppress everything else
 //0x774FD0 __thiscall(text, BSSoundHandle[12], NiPoint3, speaker, instant) ret 0x24
 static void __cdecl OnVanillaSubtitle(const char* text, TESObjectREFR* speaker) {
-	if (g_isLoading) return;
+	if (IsLoadingState()) return;
 	if (!text || !text[0]) return;
-	if (!g_narratorPending) {
+	if (!IsNarratorPendingState()) {
 		return;
 	}
 	if (IsEmptyOrWhitespace(text)) return;
@@ -1271,7 +1362,7 @@ static void __cdecl OnVanillaSubtitle(const char* text, TESObjectREFR* speaker) 
 				g_pending[i].duration = g_narratorDuration;
 				g_pending[i].isNarrator = true;
 				InterlockedExchange(&g_pending[i].state, 2);
-				g_narratorPending = false;
+				SetNarratorPendingState(false);
 				return;
 			}
 		}
@@ -1291,11 +1382,10 @@ static __declspec(naked) void AppendSubtitleHook() {
 }
 
 static void SuppressVanillaSubtitles() {
-	constexpr UInt32 kAppendSubtitleData = 0x774FD0;
 	UInt8 jmpPatch[5];
 	jmpPatch[0] = 0xE9;
-	*(UInt32*)(jmpPatch + 1) = (UInt32)AppendSubtitleHook - (kAppendSubtitleData + 5);
-	SafeWriteBuf(kAppendSubtitleData, jmpPatch, 5);
+	*(UInt32*)(jmpPatch + 1) = (UInt32)AppendSubtitleHook - (0x774FD0 + 5);
+	SafeWriteBuf(0x774FD0, jmpPatch, 5);
 	Log("Vanilla subtitle hook installed");
 }
 
@@ -1352,14 +1442,14 @@ static void MessageHandler(NVSEMessage* msg) {
 			OnMainGameLoop();
 			break;
 		case kMessage_PreLoadGame:
-			g_isLoading = true;
+			SetLoadingState(true);
 			g_callbackRegistered = false;
 			g_registerCallback = nullptr;
 			ResetState(true);
 			g_disabled = false;
 			break;
 		case kMessage_ExitToMainMenu:
-			g_isLoading = true;
+			SetLoadingState(true);
 			g_callbackRegistered = false;
 			g_registerCallback = nullptr;
 			ResetState(true);
@@ -1370,30 +1460,33 @@ static void MessageHandler(NVSEMessage* msg) {
 			g_registerCallback = nullptr;
 			ResetState(true);
 			g_disabled = false;
-			g_isLoading = false;
+			SetLoadingState(false);
 			break;
 		case kMessage_NewGame:
-			g_isLoading = false;
+			SetLoadingState(false);
 			break;
-		case kMessage_ReloadConfig:
-			// ReloadPluginConfig dispatches with target plugin name in msg->data.
-			// Ignore reload requests for other plugins to avoid unnecessary churn.
+			case kMessage_ReloadConfig:
+				// ReloadPluginConfig dispatches with target plugin name in msg->data.
+				// Ignore reload requests for other plugins to avoid unnecessary churn.
 			if (msg->data && msg->dataLen > 0) {
 				const char* pluginName = (const char*)msg->data;
 				if (_stricmp(pluginName, PLUGIN_NAME) != 0) {
 					break;
 				}
 			}
-			Config::Load(g_iniPath);
-			if (!Config::bSuppressMenuDialogueTail) {
-				g_lastDialogueMenuOpenTick = 0;
-				g_prevDialogueMenuOpen = false;
-				ClearRecentDialogueTopics();
-			}
-			ApplyFontSettings();
-			break;
+				Config::Load(g_iniPath);
+				g_runtimeFloatingWrapWidth = Config::fFloatingWrapWidth;
+				g_runtimeCenterWrapWidth = Config::fCenterWrapWidth;
+				if (!Config::bSuppressMenuDialogueTail) {
+					g_lastDialogueMenuOpenTick = 0;
+					g_prevDialogueMenuOpen = false;
+					ClearRecentDialogueTopics();
+				}
+				// MCM can fire reload during menu teardown; defer UI writes to HUD update.
+				g_applyVisualSettingsPending = true;
+				break;
+		}
 	}
-}
 
 void Init(const NVSEInterface* nvse) {
 	char logPath[MAX_PATH];
@@ -1403,6 +1496,8 @@ void Init(const NVSEInterface* nvse) {
 
 	sprintf(g_iniPath, "%sData\\config\\FloatingSubtitlesNVSE.ini", nvse->GetRuntimeDirectory());
 	Config::Load(g_iniPath);
+	g_runtimeFloatingWrapWidth = Config::fFloatingWrapWidth;
+	g_runtimeCenterWrapWidth = Config::fCenterWrapWidth;
 
 	g_pluginHandle = nvse->GetPluginHandle();
 	g_messagingInterface = (NVSEMessagingInterface*)nvse->QueryInterface(kInterface_Messaging);
