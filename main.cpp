@@ -119,7 +119,30 @@ struct NVSEMessage {
 };
 
 enum { kMessage_PostLoad = 0, kMessage_ExitToMainMenu = 2, kMessage_PreLoadGame = 6, kMessage_PostLoadGame = 8, kMessage_PostPostLoad = 9, kMessage_NewGame = 14, kMessage_MainGameLoop = 20, kMessage_ReloadConfig = 25 };
-enum { kInterface_Messaging = 2 };
+enum { kInterface_Messaging = 2, kInterface_EventManager = 8 };
+
+struct NVSEEventManagerInterface {
+	typedef void (*NativeEventHandler)(TESObjectREFR* thisObj, void* parameters);
+
+	enum ParamType : UInt8 {
+		eParamType_Float = 0, eParamType_Int, eParamType_String, eParamType_Array,
+		eParamType_RefVar, eParamType_AnyForm = eParamType_RefVar,
+		eParamType_Reference, eParamType_BaseForm,
+		eParamType_Invalid, eParamType_Anything
+	};
+
+	enum EventFlags : UInt32 { kFlags_None = 0, kFlag_FlushOnLoad = 1 << 0 };
+
+	bool (*RegisterEvent)(const char* name, UInt8 numParams, ParamType* paramTypes, EventFlags flags);
+	bool (*DispatchEvent)(const char* eventName, TESObjectREFR* thisObj, ...);
+
+	enum DispatchReturn : signed char { kRetn_UnknownEvent = -2, kRetn_GenericError = -1, kRetn_Normal = 0, kRetn_EarlyBreak, kRetn_Deferred };
+	typedef bool (*DispatchCallback)(void* result, void* anyData);
+
+	DispatchReturn (*DispatchEventAlt)(const char* eventName, DispatchCallback resultCallback, void* anyData, TESObjectREFR* thisObj, ...);
+	bool (*SetNativeEventHandler)(const char* eventName, NativeEventHandler func);
+	bool (*RemoveNativeEventHandler)(const char* eventName, NativeEventHandler func);
+};
 
 #define EXTERN_DLL_EXPORT extern "C" __declspec(dllexport)
 
@@ -193,6 +216,9 @@ static bool NameMatchesBobFromAccounting(const char* name) {
 
 typedef TESForm* (__cdecl* LookupByEditorID_t)(const char* editorID);
 static LookupByEditorID_t g_lookupByEditorID = (LookupByEditorID_t)0x483A00;
+
+typedef TESForm* (__cdecl* _LookupFormByID)(UInt32 refID);
+static _LookupFormByID LookupFormByID = (_LookupFormByID)0x4839C0;
 static TESForm* g_cachedDLC02NarratorBase = nullptr;
 
 static bool IsNarratorActor(Actor* actor) {
@@ -243,25 +269,20 @@ static void SafeWriteBuf(UInt32 addr, void* data, UInt32 len) {
 constexpr char PLUGIN_NAME[] = "FloatingSubtitlesNVSE";
 constexpr UInt32 PLUGIN_VERSION = 100;
 
-//forward declarations for itr-nvse types
 class TESTopicInfo;
 class TESTopic;
-
-//callback type from itr-nvse (duration in seconds)
-typedef void (*DTF_NativeCallback)(Actor* speaker, const char* text, float duration, TESTopicInfo* topicInfo, TESTopic* topic);
-typedef bool (*DTF_RegisterNativeCallback_t)(DTF_NativeCallback callback);
 
 namespace FloatingSubtitles {
 
 static NVSEMessagingInterface* g_messagingInterface = nullptr;
+static NVSEEventManagerInterface* g_eventInterface = nullptr;
 static UInt32 g_pluginHandle = 0;
 static PlayerCharacter** g_thePlayer = (PlayerCharacter**)0x11DEA3C;
 static FILE* g_logFile = nullptr;
-static DTF_RegisterNativeCallback_t g_registerCallback = nullptr;
 static bool g_callbackRegistered = false;
 static char g_iniPath[MAX_PATH] = {};
 static volatile long g_narratorPending = 0;
-static Actor* g_narratorSpeaker = nullptr;
+static UInt32 g_narratorSpeakerRefID = 0;
 static float g_narratorDuration = 5.0f;
 static volatile long g_isLoading = 0;
 static bool g_applyVisualSettingsPending = false;
@@ -573,7 +594,7 @@ static int FindSubtitleForSpeaker(Actor* speaker) {
 
 //pending subtitle queue (callback may be called from different context)
 struct PendingSubtitle {
-	Actor* speaker;
+	UInt32 speakerRefID;
 	char text[512];
 	float duration;
 	bool isNarrator;
@@ -586,7 +607,7 @@ static void ClearPendingSubtitleQueue() {
 		InterlockedExchange(&g_pending[i].state, 0);
 	}
 	SetNarratorPendingState(false);
-	g_narratorSpeaker = nullptr;
+	g_narratorSpeakerRefID = 0;
 	g_narratorDuration = 5.0f;
 }
 
@@ -689,13 +710,18 @@ static bool IsRecentDialogueTopic(TESTopicInfo* topicInfo, DWORD now) {
 	return false;
 }
 
-//callback from itr-nvse - queue speaker pointer for main thread processing
-static void OnDialogueCallback(Actor* speaker, const char* text, float duration, TESTopicInfo* topicInfo, TESTopic* topic) {
+//native event handler for ITR:OnDialogueText
+//params: [0]=speaker(form), [1]=topic(form), [2]=topicInfo(form), [3]=text(str), [4]=voicePath(str)
+static void OnDialogueEvent(TESObjectREFR* thisObj, void* parameters) {
+	void** p = (void**)parameters;
+	Actor* speaker = (Actor*)p[0];
+	TESTopicInfo* topicInfo = (TESTopicInfo*)p[2];
+	const char* text = (const char*)p[3];
+
 	DWORD now = GetTickCount();
 
-	if (IsLoadingState()) {
-		return;
-	}
+	if (IsLoadingState()) return;
+
 	if (Config::bSuppressMenuDialogueTail) {
 		bool dialogueMenuOpen = IsDialogueMenuOpen();
 		if (dialogueMenuOpen) {
@@ -710,13 +736,17 @@ static void OnDialogueCallback(Actor* speaker, const char* text, float duration,
 		}
 	}
 
-	if (!speaker || !text || !text[0]) {
-		return;
-	}
+	if (!speaker || !text || !text[0]) return;
+
+	//calculate duration: strlen * fNoticeTextTimePerCharacter
+	float timePerChar = *(float*)(0x11D2178 + 0x04);
+	if (timePerChar <= 0.0f) timePerChar = 0.08f;
+	float duration = (float)strlen(text) * timePerChar;
+	if (duration < 2.0f) duration = 2.0f;
 
 	for (int i = 0; i < 16; i++) {
 		if (InterlockedCompareExchange(&g_pending[i].state, 1, 0) == 0) {
-			g_pending[i].speaker = speaker;
+			g_pending[i].speakerRefID = speaker->refID;
 			strncpy(g_pending[i].text, text, 511);
 			g_pending[i].text[511] = 0;
 			g_pending[i].duration = duration;
@@ -745,13 +775,15 @@ static void ProcessPendingSubtitles() {
 
 		for (int i = 0; i < 16; i++) {
 			if (InterlockedCompareExchange(&g_pending[i].state, 3, 2) == 2) {
-				Actor* speaker = g_pending[i].speaker;
+				UInt32 speakerRefID = g_pending[i].speakerRefID;
+				Actor* speaker = (Actor*)LookupFormByID(speakerRefID);
 				if (!speaker || !IsFormValid((TESForm*)speaker)) {
+					Log("Dropped pending[%d]: invalid speaker 0x%08X", i, speakerRefID);
 					InterlockedExchange(&g_pending[i].state, 0);
 					continue;
 				}
-				UInt32 speakerRefID = speaker->refID;
-				if (IsPlayerSpeaker(speaker, speakerRefID)) {
+				if (!g_pending[i].isNarrator && IsPlayerSpeaker(speaker, speakerRefID)) {
+					Log("Dropped pending[%d]: player speaker 0x%08X (isNarrator=%d)", i, speakerRefID, g_pending[i].isNarrator);
 					InterlockedExchange(&g_pending[i].state, 0);
 					continue;
 				}
@@ -771,6 +803,7 @@ static void ProcessPendingSubtitles() {
 			}
 
 				const char* text = g_pending[i].text;
+				Log("Processing pending[%d]: \"%s\" speaker=0x%08X isNarrator=%d", i, text, speakerRefID, g_pending[i].isNarrator);
 
 					//check narrator on main thread
 					bool narrator = g_pending[i].isNarrator;
@@ -779,7 +812,7 @@ static void ProcessPendingSubtitles() {
 						narratorDetected = IsNarratorActor(speaker);
 					}
 					if (!narrator && narratorDetected) {
-						g_narratorSpeaker = speaker;
+						g_narratorSpeakerRefID = speakerRefID;
 						g_narratorDuration = durSec;
 						SetNarratorPendingState(true);
 						InterlockedExchange(&g_pending[i].state, 0);
@@ -799,6 +832,7 @@ static void ProcessPendingSubtitles() {
 					} else {
 						FormatSubtitleText(g_activeSubtitles[existing].text, 512, speaker, text);
 					}
+					Log("  -> existing slot %d, final: \"%s\"", existing, g_activeSubtitles[existing].text);
 					g_activeSubtitles[existing].timeAdded = now;
 					g_activeSubtitles[existing].duration = durationMs;
 				if (Config::bAnimateInterruptReplace && wasVisible) {
@@ -854,6 +888,7 @@ static void ProcessPendingSubtitles() {
 					} else {
 						FormatSubtitleText(g_activeSubtitles[slot].text, 512, speaker, text);
 					}
+					Log("  -> new slot %d, narrator=%d, final: \"%s\"", slot, narrator, g_activeSubtitles[slot].text);
 					g_activeSubtitles[slot].timeAdded = now;
 				g_activeSubtitles[slot].duration = durationMs;
 				g_activeSubtitles[slot].transitionStart = 0;
@@ -1062,15 +1097,16 @@ static void UpdateSubtitlePositions() {
 		ActiveSubtitle& sub = g_activeSubtitles[i];
 		if (!sub.tile) continue;
 
-			if (!sub.valid || !sub.actor) {
+			if (!sub.valid || !sub.actorRefID) {
 				sub.tile->SetFloat(g_traitX, -1.0f);
 				sub.tile->SetFloat(g_traitY, -1.0f);
 				sub.tile->SetFloat(g_traitVisible, 0.0f);
 				continue;
 			}
 
-			//check actor still valid
-			if (!IsFormValid((TESForm*)sub.actor)) {
+			//re-resolve actor from refID each frame (pointer may have gone stale)
+			Actor* actor = (Actor*)LookupFormByID(sub.actorRefID);
+			if (!actor || !IsFormValid((TESForm*)actor)) {
 				sub.valid = false;
 				sub.actor = nullptr;
 				sub.actorRefID = 0;
@@ -1079,15 +1115,7 @@ static void UpdateSubtitlePositions() {
 				sub.tile->SetFloat(g_traitVisible, 0.0f);
 				continue;
 			}
-			if (sub.actorRefID && sub.actor->refID != sub.actorRefID) {
-				sub.valid = false;
-				sub.actor = nullptr;
-				sub.actorRefID = 0;
-				sub.transitionActive = false;
-				sub.fadeInActive = false;
-				sub.tile->SetFloat(g_traitVisible, 0.0f);
-				continue;
-			}
+			sub.actor = actor;
 
 		//narrators always go to off-screen display, skip distance/LOS
 		if (sub.isNarrator) {
@@ -1181,7 +1209,7 @@ static void UpdateSubtitlePositions() {
 			placement.x = screenPos.x;
 			placement.y = screenPos.y;
 			placement.alpha = alpha;
-			placement.actorRefID = sub.actor ? sub.actor->refID : 0;
+			placement.actorRefID = sub.actorRefID;
 		}
 	}
 
@@ -1344,20 +1372,19 @@ static void InstallHUDHook() {
 	Log("HUD update hook installed");
 }
 
-//intercept AppendSubtitleData: capture narrator text for off-screen display, suppress everything else
+//intercept AppendSubtitleData: narrators/holotapes to off-screen, suppress all else (itr-nvse handles it)
 //0x774FD0 __thiscall(text, BSSoundHandle[12], NiPoint3, speaker, instant) ret 0x24
 static void __cdecl OnVanillaSubtitle(const char* text, TESObjectREFR* speaker) {
 	if (IsLoadingState()) return;
 	if (!text || !text[0]) return;
-	if (!IsNarratorPendingState()) {
-		return;
-	}
 	if (IsEmptyOrWhitespace(text)) return;
 
-	for (int i = 0; i < 16; i++) {
-		if (InterlockedCompareExchange(&g_pending[i].state, 1, 0) == 0) {
-			g_pending[i].speaker = g_narratorSpeaker;
-			strncpy(g_pending[i].text, text, 511);
+	//narrator sandwich: itr-nvse detected narrator actor, capture vanilla text for off-screen
+	if (IsNarratorPendingState()) {
+		for (int i = 0; i < 16; i++) {
+			if (InterlockedCompareExchange(&g_pending[i].state, 1, 0) == 0) {
+				g_pending[i].speakerRefID = g_narratorSpeakerRefID;
+				strncpy(g_pending[i].text, text, 511);
 				g_pending[i].text[511] = 0;
 				g_pending[i].duration = g_narratorDuration;
 				g_pending[i].isNarrator = true;
@@ -1366,6 +1393,28 @@ static void __cdecl OnVanillaSubtitle(const char* text, TESObjectREFR* speaker) 
 				return;
 			}
 		}
+		return;
+	}
+
+	if (!IsPlayerSpeaker((Actor*)speaker)) return;
+	if (!*(UInt8*)0x11DCFA4) return; //no holotape = player combat bark, suppress
+	if (IsDialogueMenuOpen()) return;
+
+	Log("Holotape subtitle: \"%s\"", text);
+	float duration = (float)strlen(text) * 0.08f;
+	if (duration < 2.0f) duration = 2.0f;
+
+	for (int i = 0; i < 16; i++) {
+		if (InterlockedCompareExchange(&g_pending[i].state, 1, 0) == 0) {
+			g_pending[i].speakerRefID = speaker->refID;
+			strncpy(g_pending[i].text, text, 511);
+			g_pending[i].text[511] = 0;
+			g_pending[i].duration = duration;
+			g_pending[i].isNarrator = true;
+			InterlockedExchange(&g_pending[i].state, 2);
+			return;
+		}
+	}
 }
 
 static __declspec(naked) void AppendSubtitleHook() {
@@ -1391,26 +1440,15 @@ static void SuppressVanillaSubtitles() {
 
 static bool InitITRCallback() {
 	if (g_callbackRegistered) return true;
+	if (!g_eventInterface) return false;
 
-	HMODULE itrModule = GetModuleHandleA("itr-nvse.dll");
-	if (!itrModule) {
-		Log("itr-nvse.dll not found - floating subtitles disabled");
-		return false;
-	}
-
-	g_registerCallback = (DTF_RegisterNativeCallback_t)GetProcAddress(itrModule, "DTF_RegisterNativeCallback");
-	if (!g_registerCallback) {
-		Log("DTF_RegisterNativeCallback not found in itr-nvse.dll");
-		return false;
-	}
-
-	if (g_registerCallback(OnDialogueCallback)) {
+	if (g_eventInterface->SetNativeEventHandler("ITR:OnDialogueText", OnDialogueEvent)) {
 		g_callbackRegistered = true;
-		Log("Registered dialogue callback with itr-nvse");
+		Log("Registered ITR:OnDialogueText native handler");
 		return true;
 	}
 
-	Log("Failed to register dialogue callback");
+	Log("Failed to register ITR:OnDialogueText handler");
 	return false;
 }
 
@@ -1443,21 +1481,18 @@ static void MessageHandler(NVSEMessage* msg) {
 			break;
 		case kMessage_PreLoadGame:
 			SetLoadingState(true);
-			g_callbackRegistered = false;
-			g_registerCallback = nullptr;
+			g_callbackRegistered = false; //kFlag_FlushOnLoad removes native handlers
 			ResetState(true);
 			g_disabled = false;
 			break;
 		case kMessage_ExitToMainMenu:
 			SetLoadingState(true);
 			g_callbackRegistered = false;
-			g_registerCallback = nullptr;
 			ResetState(true);
 			g_disabled = false;
 			break;
 		case kMessage_PostLoadGame:
 			g_callbackRegistered = false;
-			g_registerCallback = nullptr;
 			ResetState(true);
 			g_disabled = false;
 			SetLoadingState(false);
@@ -1501,10 +1536,14 @@ void Init(const NVSEInterface* nvse) {
 
 	g_pluginHandle = nvse->GetPluginHandle();
 	g_messagingInterface = (NVSEMessagingInterface*)nvse->QueryInterface(kInterface_Messaging);
+	g_eventInterface = (NVSEEventManagerInterface*)nvse->QueryInterface(kInterface_EventManager);
 
 	if (g_messagingInterface) {
 		g_messagingInterface->RegisterListener(g_pluginHandle, "NVSE", (void*)MessageHandler);
 	}
+
+	if (!g_eventInterface)
+		Log("EventManager interface not available (kNVSE not installed?)");
 }
 
 } //namespace FloatingSubtitles
