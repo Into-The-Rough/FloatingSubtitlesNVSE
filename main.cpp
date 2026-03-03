@@ -508,10 +508,19 @@ namespace Config {
 	}
 }
 
+//queued line for same-speaker sequential playback
+struct QueuedLine {
+	char text[512];
+	float duration;
+};
+
+static const int MAX_QUEUED_LINES = 16;
+
 //subtitle with actor tracking and its own tile
 struct ActiveSubtitle {
 	Actor* actor;        //actual speaker ref from itr-nvse callback
 	UInt32 actorRefID;   //stable identity across transient actor pointers
+	UInt32 topicInfoRefID; //tracks which topicInfo this subtitle is for
 	Tile* tile;          //dynamically created tile
 	char text[512];
 	DWORD timeAdded;     //GetTickCount() when added
@@ -524,6 +533,9 @@ struct ActiveSubtitle {
 	bool fadeInActive;
 	bool valid;
 	bool isNarrator;
+	QueuedLine queue[MAX_QUEUED_LINES];
+	int queueCount;
+	int queueHead;
 };
 
 static const int MAX_SUBTITLES = 64;
@@ -595,6 +607,7 @@ static int FindSubtitleForSpeaker(Actor* speaker) {
 //pending subtitle queue (callback may be called from different context)
 struct PendingSubtitle {
 	UInt32 speakerRefID;
+	UInt32 topicInfoRefID;
 	char text[512];
 	float duration;
 	bool isNarrator;
@@ -738,6 +751,11 @@ static void OnDialogueEvent(TESObjectREFR* thisObj, void* parameters) {
 
 	if (!speaker || !text || !text[0]) return;
 
+	const char* voicePath = (const char*)p[4];
+	UInt32 infoRefID = topicInfo ? ((TESForm*)topicInfo)->refID : 0;
+	Log("OnDialogueEvent: speaker=0x%08X topicInfo=0x%08X voice=\"%s\" text=\"%.80s\"",
+		speaker->refID, infoRefID, voicePath ? voicePath : "(null)", text);
+
 	//calculate duration: strlen * fNoticeTextTimePerCharacter
 	float timePerChar = *(float*)(0x11D2178 + 0x04);
 	if (timePerChar <= 0.0f) timePerChar = 0.08f;
@@ -747,6 +765,7 @@ static void OnDialogueEvent(TESObjectREFR* thisObj, void* parameters) {
 	for (int i = 0; i < 16; i++) {
 		if (InterlockedCompareExchange(&g_pending[i].state, 1, 0) == 0) {
 			g_pending[i].speakerRefID = speaker->refID;
+			g_pending[i].topicInfoRefID = infoRefID;
 			strncpy(g_pending[i].text, text, 511);
 			g_pending[i].text[511] = 0;
 			g_pending[i].duration = duration;
@@ -819,33 +838,73 @@ static void ProcessPendingSubtitles() {
 						continue;
 					}
 
-				//check if speaker already has subtitle - replace it
+				//check if speaker already has subtitle
 				int existing = FindSubtitleForSpeaker(speaker);
 				if (existing >= 0) {
 					ActiveSubtitle& current = g_activeSubtitles[existing];
-					bool wasVisible = current.valid && IsTileVisibleNow(current.tile) && ((now - current.timeAdded) < current.duration);
-					current.actor = speaker;
-					current.actorRefID = speakerRefID;
-					if (narrator) {
-						strncpy(g_activeSubtitles[existing].text, text, 511);
-						g_activeSubtitles[existing].text[511] = 0;
-					} else {
-						FormatSubtitleText(g_activeSubtitles[existing].text, 512, speaker, text);
-					}
-					Log("  -> existing slot %d, final: \"%s\"", existing, g_activeSubtitles[existing].text);
-					g_activeSubtitles[existing].timeAdded = now;
-					g_activeSubtitles[existing].duration = durationMs;
-				if (Config::bAnimateInterruptReplace && wasVisible) {
-					current.transitionStart = now;
-					current.transitionDuration = (DWORD)(Config::fInterruptAnimSeconds * 1000.0f);
-					if (current.transitionDuration < 30) current.transitionDuration = 30;
-					current.transitionActive = true;
-					} else {
+					UInt32 pendingInfoRefID = g_pending[i].topicInfoRefID;
+
+					//different topicInfo = greeting re-evaluation or new dialogue line
+					//replace the subtitle instead of queuing
+					if (pendingInfoRefID && current.topicInfoRefID && pendingInfoRefID != current.topicInfoRefID) {
+						char formatted[512];
+						if (narrator) {
+							strncpy(formatted, text, 511);
+							formatted[511] = 0;
+						} else {
+							FormatSubtitleText(formatted, 512, speaker, text);
+						}
+						Log("  -> REPLACE slot %d: topicInfo changed 0x%08X -> 0x%08X, text: \"%s\"",
+							existing, current.topicInfoRefID, pendingInfoRefID, formatted);
+						strncpy(current.text, formatted, 511);
+						current.text[511] = 0;
+						current.topicInfoRefID = pendingInfoRefID;
+						current.timeAdded = now;
+						current.duration = durationMs;
+						current.queueCount = 0;
+						current.queueHead = 0;
 						current.transitionActive = false;
+						if (Config::bFadeInNewSubtitles) {
+							current.fadeInStart = now;
+							current.fadeInDuration = (DWORD)(Config::fNewSubtitleFadeSeconds * 1000.0f);
+							current.fadeInActive = current.fadeInDuration > 0;
+						}
+						InterlockedExchange(&g_pending[i].state, 0);
+						continue;
 					}
-					current.fadeInActive = false;
-					current.fadeInStart = 0;
-					current.fadeInDuration = 0;
+
+					//same topicInfo - queue as multi-line continuation
+					char formatted[512];
+					if (narrator) {
+						strncpy(formatted, text, 511);
+						formatted[511] = 0;
+					} else {
+						FormatSubtitleText(formatted, 512, speaker, text);
+					}
+
+					//dedup: skip if same text is currently displayed or already queued
+					bool duplicate = (strcmp(current.text, formatted) == 0);
+					if (!duplicate) {
+						for (int q = 0; q < current.queueCount && !duplicate; q++) {
+							int idx = (current.queueHead + q) % MAX_QUEUED_LINES;
+							if (strcmp(current.queue[idx].text, formatted) == 0)
+								duplicate = true;
+						}
+					}
+					if (duplicate) {
+						InterlockedExchange(&g_pending[i].state, 0);
+						continue;
+					}
+
+					if (current.queueCount < MAX_QUEUED_LINES) {
+						int writeIdx = (current.queueHead + current.queueCount) % MAX_QUEUED_LINES;
+						QueuedLine& ql = current.queue[writeIdx];
+						strncpy(ql.text, formatted, 511);
+						ql.text[511] = 0;
+						ql.duration = durSec;
+						current.queueCount++;
+						Log("  -> queued in slot %d (depth %d), text: \"%s\"", existing, current.queueCount, ql.text);
+					}
 					InterlockedExchange(&g_pending[i].state, 0);
 					continue;
 				}
@@ -905,6 +964,9 @@ static void ProcessPendingSubtitles() {
 				}
 				g_activeSubtitles[slot].valid = true;
 				g_activeSubtitles[slot].isNarrator = narrator;
+				g_activeSubtitles[slot].topicInfoRefID = g_pending[i].topicInfoRefID;
+				g_activeSubtitles[slot].queueCount = 0;
+				g_activeSubtitles[slot].queueHead = 0;
 
 				InterlockedExchange(&g_pending[i].state, 0);
 			}
@@ -937,6 +999,9 @@ static void ResetState(bool hideTiles = true) {
 		g_activeSubtitles[i].fadeInDuration = 0;
 		g_activeSubtitles[i].fadeInActive = false;
 		g_activeSubtitles[i].isNarrator = false;
+		g_activeSubtitles[i].topicInfoRefID = 0;
+		g_activeSubtitles[i].queueCount = 0;
+		g_activeSubtitles[i].queueHead = 0;
 	}
 }
 
@@ -1251,6 +1316,8 @@ static void HideAllSubtitles() {
 		g_activeSubtitles[i].fadeInActive = false;
 		g_activeSubtitles[i].fadeInStart = 0;
 		g_activeSubtitles[i].fadeInDuration = 0;
+		g_activeSubtitles[i].queueCount = 0;
+		g_activeSubtitles[i].queueHead = 0;
 		if (g_activeSubtitles[i].tile) {
 			g_activeSubtitles[i].tile->SetFloat(g_traitVisible, 0.0f);
 		}
@@ -1337,22 +1404,44 @@ static void OnHUDUpdate() {
 	ProcessPendingSubtitles();
 	UpdateSubtitlePositions();
 
-	//expire subtitles based on their duration
+	//expire subtitles - advance queue or hide
 	DWORD now = GetTickCount();
-		for (int i = 0; i < MAX_SUBTITLES; i++) {
-			if (g_activeSubtitles[i].valid && (now - g_activeSubtitles[i].timeAdded) > g_activeSubtitles[i].duration) {
-				g_activeSubtitles[i].valid = false;
-				g_activeSubtitles[i].actor = nullptr;
-				g_activeSubtitles[i].actorRefID = 0;
-				g_activeSubtitles[i].transitionActive = false;
-				g_activeSubtitles[i].transitionStart = 0;
-				g_activeSubtitles[i].transitionDuration = 0;
-				g_activeSubtitles[i].fadeInActive = false;
-				g_activeSubtitles[i].fadeInStart = 0;
-				g_activeSubtitles[i].fadeInDuration = 0;
-				if (g_activeSubtitles[i].tile) {
-					g_activeSubtitles[i].tile->SetFloat(g_traitVisible, 0.0f);
-				}
+	for (int i = 0; i < MAX_SUBTITLES; i++) {
+		ActiveSubtitle& sub = g_activeSubtitles[i];
+		if (!sub.valid) continue;
+		if ((now - sub.timeAdded) <= sub.duration) continue;
+
+		//current line expired - check queue for next line
+		if (sub.queueCount > 0) {
+			QueuedLine& ql = sub.queue[sub.queueHead];
+			strncpy(sub.text, ql.text, 511);
+			sub.text[511] = 0;
+			float durSec = ql.duration;
+			if (durSec < 0.5f) durSec = 0.5f;
+			if (durSec > 30.0f) durSec = 30.0f;
+			sub.timeAdded = now;
+			sub.duration = (DWORD)(durSec * 1000.0f);
+			sub.queueHead = (sub.queueHead + 1) % MAX_QUEUED_LINES;
+			sub.queueCount--;
+			sub.transitionActive = false;
+			sub.fadeInActive = false;
+			Log("Queue advance slot %d (remaining %d): \"%s\"", i, sub.queueCount, sub.text);
+			continue;
+		}
+
+		sub.valid = false;
+		sub.actor = nullptr;
+		sub.actorRefID = 0;
+		sub.transitionActive = false;
+		sub.transitionStart = 0;
+		sub.transitionDuration = 0;
+		sub.fadeInActive = false;
+		sub.fadeInStart = 0;
+		sub.fadeInDuration = 0;
+		sub.queueCount = 0;
+		sub.queueHead = 0;
+		if (sub.tile) {
+			sub.tile->SetFloat(g_traitVisible, 0.0f);
 		}
 	}
 }
