@@ -57,7 +57,7 @@
       <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;_USRDLL;WIN32_LEAN_AND_MEAN;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <WarningLevel>Level3</WarningLevel>
-      <DebugInformationFormat>None</DebugInformationFormat>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <Optimization>MinSpace</Optimization>
       <FavorSizeOrSpeed>Size</FavorSizeOrSpeed>
@@ -67,7 +67,7 @@
       <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <Link>
-      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
       <SubSystem>Windows</SubSystem>
       <OptimizeReferences>true</OptimizeReferences>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
@@ -97,7 +97,8 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <Target Name="CopyDLL" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="D:\Modding\VNV\mods\Floating Subtitles\NVSE\Plugins\" />
-    <Message Text="Copying DLL to mod folder..." Importance="high" />
+    <Copy SourceFiles="$(TargetDir)$(TargetName).pdb" DestinationFolder="D:\Modding\VNV\mods\Floating Subtitles\NVSE\Plugins\" Condition="Exists('$(TargetDir)$(TargetName).pdb')" />
+    <Message Text="Copying DLL/PDB to mod folder..." Importance="high" />
   </Target>
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

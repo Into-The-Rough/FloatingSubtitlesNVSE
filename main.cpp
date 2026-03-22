@@ -257,6 +257,7 @@ static void SafeWrite32(UInt32 addr, UInt32 data) {
 	VirtualProtect((void*)addr, 4, PAGE_EXECUTE_READWRITE, &oldProtect);
 	*(UInt32*)addr = data;
 	VirtualProtect((void*)addr, 4, oldProtect, &oldProtect);
+	FlushInstructionCache(GetCurrentProcess(), (void*)addr, 4);
 }
 
 static void SafeWriteBuf(UInt32 addr, void* data, UInt32 len) {
@@ -264,6 +265,7 @@ static void SafeWriteBuf(UInt32 addr, void* data, UInt32 len) {
 	VirtualProtect((void*)addr, len, PAGE_EXECUTE_READWRITE, &oldProtect);
 	memcpy((void*)addr, data, len);
 	VirtualProtect((void*)addr, len, oldProtect, &oldProtect);
+	FlushInstructionCache(GetCurrentProcess(), (void*)addr, len);
 }
 
 constexpr char PLUGIN_NAME[] = "FloatingSubtitlesNVSE";
@@ -410,6 +412,8 @@ static NiAVObject* GetBlockByNameInternal(NiNode* node, const char* namePtr) {
 	}
 	return nullptr;
 }
+
+static const char* g_cachedHeadBoneStr = nullptr;
 
 static NiAVObject* GetBlockByName(NiNode* node, const char* name) {
 	if (!node || !name || !name[0]) return nullptr;
@@ -1196,7 +1200,12 @@ static void UpdateSubtitlePositions() {
 		NiPoint3 worldPos;
 		NiNode* niNode = GetRefNiNode((TESObjectREFR*)sub.actor);
 		if (niNode) {
-			NiAVObject* headBone = GetBlockByName(niNode, "Bip01 Head");
+			//use cached NiFixedString to avoid per-frame hash lookup + atomics
+		if (!g_cachedHeadBoneStr) {
+			g_cachedHeadBoneStr = GetNiFixedString("Bip01 Head");
+			//don't decrement - keep ref alive for process lifetime
+		}
+		NiAVObject* headBone = g_cachedHeadBoneStr ? GetBlockByNameInternal(niNode, g_cachedHeadBoneStr) : nullptr;
 			if (headBone) {
 				worldPos.x = headBone->worldX;
 				worldPos.y = headBone->worldY;
@@ -1446,20 +1455,6 @@ static void OnHUDUpdate() {
 	}
 }
 
-typedef void (__thiscall* HUDUpdate_t)(void* hud);
-static HUDUpdate_t g_originalHUDUpdate = nullptr;
-
-static void __fastcall HUDUpdateHook(void* hud, void* edx) {
-	if (g_originalHUDUpdate) g_originalHUDUpdate(hud);
-	OnHUDUpdate();
-}
-
-static void InstallHUDHook() {
-	UInt32 vtblAddr = 0x1072DF4 + 11 * 4;
-	g_originalHUDUpdate = *(HUDUpdate_t*)vtblAddr;
-	SafeWrite32(vtblAddr, (UInt32)HUDUpdateHook);
-	Log("HUD update hook installed");
-}
 
 //intercept AppendSubtitleData: narrators/holotapes to off-screen, suppress all else (itr-nvse handles it)
 //0x774FD0 __thiscall(text, BSSoundHandle[12], NiPoint3, speaker, instant) ret 0x24
@@ -1473,6 +1468,7 @@ static void __cdecl OnVanillaSubtitle(const char* text, TESObjectREFR* speaker) 
 		for (int i = 0; i < 16; i++) {
 			if (InterlockedCompareExchange(&g_pending[i].state, 1, 0) == 0) {
 				g_pending[i].speakerRefID = g_narratorSpeakerRefID;
+				g_pending[i].topicInfoRefID = 0;
 				strncpy(g_pending[i].text, text, 511);
 				g_pending[i].text[511] = 0;
 				g_pending[i].duration = g_narratorDuration;
@@ -1482,6 +1478,7 @@ static void __cdecl OnVanillaSubtitle(const char* text, TESObjectREFR* speaker) 
 				return;
 			}
 		}
+		SetNarratorPendingState(false); //queue full, clear flag to prevent misclassifying next subtitle
 		return;
 	}
 
@@ -1496,6 +1493,7 @@ static void __cdecl OnVanillaSubtitle(const char* text, TESObjectREFR* speaker) 
 	for (int i = 0; i < 16; i++) {
 		if (InterlockedCompareExchange(&g_pending[i].state, 1, 0) == 0) {
 			g_pending[i].speakerRefID = speaker->refID;
+			g_pending[i].topicInfoRefID = 0;
 			strncpy(g_pending[i].text, text, 511);
 			g_pending[i].text[511] = 0;
 			g_pending[i].duration = duration;
@@ -1520,6 +1518,12 @@ static __declspec(naked) void AppendSubtitleHook() {
 }
 
 static void SuppressVanillaSubtitles() {
+	//push ebp / mov ebp,esp / push -1
+	UInt8 expected[] = { 0x55, 0x8B, 0xEC, 0x6A, 0xFF };
+	if (memcmp((void*)0x774FD0, expected, 5) != 0) {
+		Log("0x774FD0 prologue mismatch - another plugin may have hooked AppendSubtitleData, skipping");
+		return;
+	}
 	UInt8 jmpPatch[5];
 	jmpPatch[0] = 0xE9;
 	*(UInt32*)(jmpPatch + 1) = (UInt32)AppendSubtitleHook - (0x774FD0 + 5);
@@ -1557,12 +1561,13 @@ static void OnMainGameLoop() {
 
 		InitFloatingSubtitles();
 	}
+
+	OnHUDUpdate();
 }
 
 static void MessageHandler(NVSEMessage* msg) {
 	switch (msg->type) {
 		case kMessage_PostPostLoad:
-			InstallHUDHook();
 			SuppressVanillaSubtitles();
 			break;
 		case kMessage_MainGameLoop:
