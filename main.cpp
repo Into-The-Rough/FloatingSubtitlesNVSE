@@ -280,7 +280,6 @@ static NVSEMessagingInterface* g_messagingInterface = nullptr;
 static NVSEEventManagerInterface* g_eventInterface = nullptr;
 static UInt32 g_pluginHandle = 0;
 static PlayerCharacter** g_thePlayer = (PlayerCharacter**)0x11DEA3C;
-static FILE* g_logFile = nullptr;
 static bool g_callbackRegistered = false;
 static char g_iniPath[MAX_PATH] = {};
 static volatile long g_narratorPending = 0;
@@ -303,15 +302,6 @@ static void SetNarratorPendingState(bool pending) {
 	InterlockedExchange(&g_narratorPending, pending ? 1 : 0);
 }
 
-static void Log(const char* fmt, ...) {
-	if (!g_logFile) return;
-	va_list args;
-	va_start(args, fmt);
-	vfprintf(g_logFile, fmt, args);
-	fprintf(g_logFile, "\n");
-	fflush(g_logFile);
-	va_end(args);
-}
 
 typedef bool (__cdecl* JG_WorldToScreen_t)(NiPoint3* posXYZ, NiPoint3* posOut, int iOffscreenHandling);
 static JG_WorldToScreen_t g_JG_WorldToScreen = nullptr;
@@ -324,12 +314,10 @@ static bool InitWorldToScreen() {
 
 	HMODULE jgModule = GetModuleHandleA("johnnyguitar.dll");
 	if (!jgModule) {
-		Log("JohnnyGuitar not found - floating subtitles disabled");
 		return false;
 	}
 
 	g_JG_WorldToScreen = (JG_WorldToScreen_t)GetProcAddress(jgModule, "JG_WorldToScreen");
-	if (g_JG_WorldToScreen) Log("JG_WorldToScreen initialized");
 	return g_JG_WorldToScreen != nullptr;
 }
 
@@ -757,9 +745,6 @@ static void OnDialogueEvent(TESObjectREFR* thisObj, void* parameters) {
 
 	const char* voicePath = (const char*)p[4];
 	UInt32 infoRefID = topicInfo ? ((TESForm*)topicInfo)->refID : 0;
-	Log("OnDialogueEvent: speaker=0x%08X topicInfo=0x%08X voice=\"%s\" text=\"%.80s\"",
-		speaker->refID, infoRefID, voicePath ? voicePath : "(null)", text);
-
 	//calculate duration: strlen * fNoticeTextTimePerCharacter
 	float timePerChar = *(float*)(0x11D2178 + 0x04);
 	if (timePerChar <= 0.0f) timePerChar = 0.08f;
@@ -801,12 +786,10 @@ static void ProcessPendingSubtitles() {
 				UInt32 speakerRefID = g_pending[i].speakerRefID;
 				Actor* speaker = (Actor*)LookupFormByID(speakerRefID);
 				if (!speaker || !IsFormValid((TESForm*)speaker)) {
-					Log("Dropped pending[%d]: invalid speaker 0x%08X", i, speakerRefID);
 					InterlockedExchange(&g_pending[i].state, 0);
 					continue;
 				}
 				if (!g_pending[i].isNarrator && IsPlayerSpeaker(speaker, speakerRefID)) {
-					Log("Dropped pending[%d]: player speaker 0x%08X (isNarrator=%d)", i, speakerRefID, g_pending[i].isNarrator);
 					InterlockedExchange(&g_pending[i].state, 0);
 					continue;
 				}
@@ -826,7 +809,6 @@ static void ProcessPendingSubtitles() {
 			}
 
 				const char* text = g_pending[i].text;
-				Log("Processing pending[%d]: \"%s\" speaker=0x%08X isNarrator=%d", i, text, speakerRefID, g_pending[i].isNarrator);
 
 					//check narrator on main thread
 					bool narrator = g_pending[i].isNarrator;
@@ -858,8 +840,6 @@ static void ProcessPendingSubtitles() {
 						} else {
 							FormatSubtitleText(formatted, 512, speaker, text);
 						}
-						Log("  -> REPLACE slot %d: topicInfo changed 0x%08X -> 0x%08X, text: \"%s\"",
-							existing, current.topicInfoRefID, pendingInfoRefID, formatted);
 						strncpy(current.text, formatted, 511);
 						current.text[511] = 0;
 						current.topicInfoRefID = pendingInfoRefID;
@@ -907,7 +887,6 @@ static void ProcessPendingSubtitles() {
 						ql.text[511] = 0;
 						ql.duration = durSec;
 						current.queueCount++;
-						Log("  -> queued in slot %d (depth %d), text: \"%s\"", existing, current.queueCount, ql.text);
 					}
 					InterlockedExchange(&g_pending[i].state, 0);
 					continue;
@@ -951,7 +930,6 @@ static void ProcessPendingSubtitles() {
 					} else {
 						FormatSubtitleText(g_activeSubtitles[slot].text, 512, speaker, text);
 					}
-					Log("  -> new slot %d, narrator=%d, final: \"%s\"", slot, narrator, g_activeSubtitles[slot].text);
 					g_activeSubtitles[slot].timeAdded = now;
 				g_activeSubtitles[slot].duration = durationMs;
 				g_activeSubtitles[slot].transitionStart = 0;
@@ -1038,7 +1016,6 @@ static void InitFloatingSubtitles() {
 	}
 
 	if (!g_fsRootTile) {
-		Log("Failed to inject FloatingSubtitles tile");
 		g_disabled = true;
 		return;
 	}
@@ -1064,7 +1041,6 @@ static void InitFloatingSubtitles() {
 	}
 
 	g_initialized = true;
-	Log("Floating subtitles initialized");
 }
 
 
@@ -1434,7 +1410,6 @@ static void OnHUDUpdate() {
 			sub.queueCount--;
 			sub.transitionActive = false;
 			sub.fadeInActive = false;
-			Log("Queue advance slot %d (remaining %d): \"%s\"", i, sub.queueCount, sub.text);
 			continue;
 		}
 
@@ -1486,7 +1461,6 @@ static void __cdecl OnVanillaSubtitle(const char* text, TESObjectREFR* speaker) 
 	if (!*(UInt8*)0x11DCFA4) return; //no holotape = player combat bark, suppress
 	if (IsDialogueMenuOpen()) return;
 
-	Log("Holotape subtitle: \"%s\"", text);
 	float duration = (float)strlen(text) * 0.08f;
 	if (duration < 2.0f) duration = 2.0f;
 
@@ -1521,14 +1495,12 @@ static void SuppressVanillaSubtitles() {
 	//push ebp / mov ebp,esp / push -1
 	UInt8 expected[] = { 0x55, 0x8B, 0xEC, 0x6A, 0xFF };
 	if (memcmp((void*)0x774FD0, expected, 5) != 0) {
-		Log("0x774FD0 prologue mismatch - another plugin may have hooked AppendSubtitleData, skipping");
 		return;
 	}
 	UInt8 jmpPatch[5];
 	jmpPatch[0] = 0xE9;
 	*(UInt32*)(jmpPatch + 1) = (UInt32)AppendSubtitleHook - (0x774FD0 + 5);
 	SafeWriteBuf(0x774FD0, jmpPatch, 5);
-	Log("Vanilla subtitle hook installed");
 }
 
 static bool InitITRCallback() {
@@ -1537,11 +1509,9 @@ static bool InitITRCallback() {
 
 	if (g_eventInterface->SetNativeEventHandler("ITR:OnDialogueText", OnDialogueEvent)) {
 		g_callbackRegistered = true;
-		Log("Registered ITR:OnDialogueText native handler");
 		return true;
 	}
 
-	Log("Failed to register ITR:OnDialogueText handler");
 	return false;
 }
 
@@ -1618,11 +1588,6 @@ static void MessageHandler(NVSEMessage* msg) {
 	}
 
 void Init(const NVSEInterface* nvse) {
-	char logPath[MAX_PATH];
-	sprintf(logPath, "%sFloatingSubtitlesNVSE.log", nvse->GetRuntimeDirectory());
-	g_logFile = fopen(logPath, "w");
-	Log("FloatingSubtitlesNVSE v%d initializing", PLUGIN_VERSION);
-
 	sprintf(g_iniPath, "%sData\\config\\FloatingSubtitlesNVSE.ini", nvse->GetRuntimeDirectory());
 	Config::Load(g_iniPath);
 	g_runtimeFloatingWrapWidth = Config::fFloatingWrapWidth;
@@ -1635,9 +1600,6 @@ void Init(const NVSEInterface* nvse) {
 	if (g_messagingInterface) {
 		g_messagingInterface->RegisterListener(g_pluginHandle, "NVSE", (void*)MessageHandler);
 	}
-
-	if (!g_eventInterface)
-		Log("EventManager interface not available (kNVSE not installed?)");
 }
 
 } //namespace FloatingSubtitles
