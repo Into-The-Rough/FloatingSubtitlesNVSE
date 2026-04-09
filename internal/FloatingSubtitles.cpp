@@ -469,6 +469,8 @@ static void OnDialogueEvent(TESObjectREFR* thisObj, void* parameters) {
 	float duration = (float)strlen(text) * timePerChar;
 	if (duration < 2.0f) duration = 2.0f;
 
+	bool narrator = IsNarratorActor(speaker);
+
 	for (int i = 0; i < 16; i++) {
 		if (InterlockedCompareExchange(&g_pending[i].state, 1, 0) == 0) {
 			g_pending[i].speakerRefID = speaker->refID;
@@ -476,7 +478,7 @@ static void OnDialogueEvent(TESObjectREFR* thisObj, void* parameters) {
 			strncpy(g_pending[i].text, text, 511);
 			g_pending[i].text[511] = 0;
 			g_pending[i].duration = duration;
-			g_pending[i].isNarrator = false;
+			g_pending[i].isNarrator = narrator;
 			InterlockedExchange(&g_pending[i].state, 2);
 			return;
 		}
@@ -525,13 +527,6 @@ static void ProcessPendingSubtitles() {
 
 		const char* text = g_pending[i].text;
 		bool narrator = g_pending[i].isNarrator;
-		if (!narrator && IsNarratorActor(speaker)) {
-			g_narratorSpeakerRefID = speakerRefID;
-			g_narratorDuration = durSec;
-			SetNarratorPendingState(true);
-			InterlockedExchange(&g_pending[i].state, 0);
-			continue;
-		}
 
 		int existing = FindSubtitleForSpeaker(speaker);
 		if (existing >= 0) {
