@@ -2,12 +2,12 @@
 
 namespace FloatingSubtitles { namespace Config {
 
-float fHeadOffset = 20.0f;
-float fMaxDistance = 3000.0f;
-float fFadeStartDistance = 2500.0f;
+float fHeadOffset = 15.0f;
+float fMaxDistance = 2048.0f;
+float fFadeStartDistance = 1536.0f;
 int iOffScreenHandling = 0;
 int iFont = 3;
-float fFontSize = 100.0f;
+float fFontSize = 80.0f;
 bool bShowSpeakerName = true;
 float fOffScreenY = 0.85f;
 float fFloatingWrapWidth = 400.0f;
