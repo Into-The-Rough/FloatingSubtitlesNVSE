@@ -3,8 +3,6 @@
 An xNVSE plugin for Fallout: New Vegas that displays NPC dialogue as floating
 subtitles above speakers' heads instead of the vanilla subtitle bar.
 
-No ESP is required.
-
 ## Features
 
 - Subtitles track speaker position in 3D space
