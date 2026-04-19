@@ -1233,6 +1233,9 @@ static void MessageHandler(NVSEMessage* msg) {
 			SetLoadingState(false);
 			break;
 		case kMessage_NewGame:
+			g_callbackRegistered = false;
+			ResetState(true);
+			g_disabled = false;
 			SetLoadingState(false);
 			break;
 		case kMessage_ReloadConfig:

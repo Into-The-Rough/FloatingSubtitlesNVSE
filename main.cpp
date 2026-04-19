@@ -2,7 +2,7 @@
 #include "FloatingSubtitles.h"
 
 const char PLUGIN_NAME[] = "FloatingSubtitlesNVSE";
-const UInt32 PLUGIN_VERSION = 100;
+const UInt32 PLUGIN_VERSION = 101;
 constexpr UInt32 RUNTIME_VERSION_1_4_0_525 = 0x040020D0;
 
 EXTERN_DLL_EXPORT bool NVSEPlugin_Query(const NVSEInterface* nvse, PluginInfo* info) {
